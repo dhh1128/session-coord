@@ -41,6 +41,7 @@ every write goes through.
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -132,8 +133,13 @@ def _mentions_git(tokens):
     as a string (`env -C`, `env -S`), which re-parses its argument with quoting and escapes of
     its own: `env -S 'git "add" -A'` hid its verb from a whitespace split (hostile fix pass on
     PR #5). Nothing reads such a command reliably, so mentioning git is enough to refuse."""
-    text = "".join(tokens).replace('"', "").replace("'", "").replace("\\", "")
-    return "git" in text
+    # As a WORD, after quotes and backslashes are gone: a bare substring refused
+    # `env -C / printf digital-camera` (hostile fix pass four). `/usr/bin/git`, `g""it` and
+    # env -S's `git\_add` still match; `digital` and `.gitignore` do not.
+    text = " ".join(tokens).replace('"', "").replace("'", "").replace("\\", "")
+    if re.search(r"(?<![A-Za-z0-9_.-])git(?![A-Za-z0-9.-])", text):
+        return True
+    return _mentions_git_write(tokens)  # git glued to an option letter: `-iSgit add -A`
 
 
 def _long_option(name, key):

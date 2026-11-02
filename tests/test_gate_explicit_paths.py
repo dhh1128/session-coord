@@ -511,3 +511,21 @@ class TestHostileFixPassThree:
 
     def test_a_dequoted_write_behind_an_unknown_option_is_still_found(self):
         assert gate.analyse("""sudo --unknown x '"git"' add -A""", "/repo")[0]
+
+
+class TestHostileFixPassFour:
+    @pytest.mark.parametrize("command", [
+        "env -C / printf digital-camera",
+        "env -S 'echo legit amend'",
+        "sudo -i cat .gitignore",
+    ])
+    def test_git_inside_another_word_is_not_git(self, command):
+        assert not gate.analyse(command, "/repo")[0], command
+
+    @pytest.mark.parametrize("command", [
+        "env -C / /usr/bin/git add -A",
+        """env -S 'g""it add -A'""",
+        r"""env -S 'git\_add\_-A'""",
+    ])
+    def test_but_git_as_a_word_still_is(self, command):
+        assert gate.analyse(command, "/repo") == (True, None), command
