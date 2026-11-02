@@ -81,6 +81,22 @@ class TestClaimedPaths:
                              workdir=REPO + "/.worktrees/x", claims=("a.md",))]
         assert detect.claimed_paths(Board.of(REPO, sessions), REPO, "me", ["a.md"]) == []
 
+    @pytest.mark.parametrize("claim,path", [
+        ("*.md", "a.md"),
+        ("docs/*/secret.md", "docs/x/secret.md"),
+        ("docs/?.md", "docs/a.md"),
+        ("docs/**/deep.md", "docs/a/b/deep.md"),
+    ])
+    def test_a_glob_claim_protects_what_it_matches(self, claim, path):
+        # Hostile pass on PR #5, finding 4: prefix overlap ignored inner globs entirely.
+        b = board(me=(), peer=(claim,))
+        assert detect.claimed_paths(b, REPO, "me", [path]), (claim, path)
+
+    def test_case_differences_do_not_slip_past_a_claim(self):
+        # Finding 3's case half: on a case-insensitive filesystem `readme.md` is `README.md`.
+        b = board(me=(), peer=("README.md",))
+        assert detect.claimed_paths(b, REPO, "me", ["readme.md"])
+
     def test_a_sibling_name_is_not_inside_a_claimed_directory(self):
         b = board(me=(), peer=("docs/cyber/**",))
         assert detect.claimed_paths(b, REPO, "me", ["docs/cyberpunk.md"]) == []

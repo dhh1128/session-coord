@@ -45,6 +45,15 @@ def tree(tmp_path):
     for name in ("products.md", "components.md", "roadmap.md", "roadmap-inputs.md",
                  "a.md", "b.md", "ai-chain-of-command.md", "sub/c.md"):
         (root / name).write_text("x\n")
+    # A real repo, so the deleted-directory check can ask the index what a path covers.
+    (root / "gone").mkdir()
+    (root / "gone" / "one.md").write_text("x\n")
+    (root / "gone" / "two.md").write_text("x\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    (root / "gone" / "one.md").unlink()
+    (root / "gone" / "two.md").unlink()
+    (root / "gone").rmdir()
     return str(root)
 
 
@@ -248,7 +257,126 @@ class TestStagedPathsReadsTheRealIndex:
     def test_it_lists_what_is_staged(self, tree):
         subprocess.run(["git", "init", "-q", tree], check=True)
         subprocess.run(["git", "-C", tree, "add", "a.md", "sub/c.md"], check=True)
-        assert set(gate.staged_paths(tree)) == {"a.md", "sub/c.md"}
+        assert {"a.md", "sub/c.md"} <= set(gate.staged_paths(tree))
 
     def test_it_says_none_when_it_cannot_look(self, tmp_path):
         assert gate.staged_paths(str(tmp_path / "not-a-repo")) is None
+
+
+class TestHostileRoundOne:
+    """Five findings from the codex hostile pass on PR #5, each reproduced before fixing."""
+
+    @pytest.mark.parametrize("command", [
+        # 2: bash expands braces before git sees them; the gate saw one literal non-file.
+        "git add {a.md,b.md}",
+        "git add a{,-x}.md",
+        "git add `echo a.md`",
+        # 3: git's own pathspec rules can widen or re-case what a literal name matches.
+        "git --icase-pathspecs add readme.md",
+        "git --glob-pathspecs add a.md",
+        "git --noglob-pathspecs add a.md",
+        "git -c core.ignorecase=true add a.md",
+        "GIT_ICASE_PATHSPECS=1 git add a.md",
+        "GIT_GLOB_PATHSPECS=1 git add a.md",
+        "git add 'README\\.md'",
+        # 5: a deleted tracked directory is not on disk, but git still reads it as a directory.
+        "git add gone",
+        "git commit -m x -- gone",
+    ])
+    def test_forms_that_hide_what_git_will_stage(self, tree, command):
+        f = form(command, tree)
+        assert not f.ok, command
+
+    def test_a_pathspec_variable_in_the_environment_refuses(self, tree, monkeypatch):
+        monkeypatch.setenv("GIT_ICASE_PATHSPECS", "1")
+        assert not form("git add a.md", tree).ok
+
+    def test_a_dash_prefixed_path_reaches_the_board_intact(self, monkeypatch):
+        # 1: `--path -peer.md` made argparse exit 2 with empty stdout, read as "no findings".
+        seen = {}
+
+        class R:
+            stdout, returncode = "[]", 0
+
+        def fake_run(argv, **kw):
+            seen["argv"] = argv
+            return R()
+
+        monkeypatch.setattr(gate.subprocess, "run", fake_run)
+        gate.ask("/t", "/t", ["-peer.md"], "me")
+        assert "--path=-peer.md" in seen["argv"]
+
+    def test_an_empty_answer_from_the_board_is_not_an_all_clear(self, monkeypatch):
+        class R:
+            stdout, returncode = "", 2
+
+        monkeypatch.setattr(gate.subprocess, "run", lambda argv, **kw: R())
+        assert gate.ask("/t", "/t", ["a.md"], "me") is None
+
+    def test_explicit_dash_prefixed_file_still_passes_parsing(self, tree):
+        (Path(tree) / "-peer.md").write_text("x\n")
+        f = form("git add -- -peer.md", tree)
+        assert f.ok and f.paths == ("-peer.md",)
+
+
+class TestALiteralCdNamesTheTree:
+    """From 2147b9ed, the session whose commits started this: `cd ~/code/tessera/brand && git
+    add <five files> && git commit` was refused with the DOCS repo's shared-tree finding --
+    a repo the command never touched -- and told to make a worktree in docs. The write lands
+    where the `cd` says when `&&` joins them, so that is the tree to ask about."""
+
+    def test_a_literal_cd_and_and_is_resolved(self, tmp_path):
+        d = tmp_path / "brand"
+        d.mkdir()
+        assert gate._literal_cd(f"cd {d} && git add a.md", "/elsewhere") == (
+            str(d), " git add a.md")
+
+    def test_a_quoted_path_with_spaces(self, tmp_path):
+        d = tmp_path / "with space"
+        d.mkdir()
+        assert gate._literal_cd(f"cd '{d}' && git add a.md", "/x")[0] == str(d)
+
+    def test_a_relative_cd_is_joined_to_cwd(self, tmp_path):
+        (tmp_path / "sub").mkdir()
+        assert gate._literal_cd("cd sub && git add a.md", str(tmp_path))[0] == str(
+            tmp_path / "sub")
+
+    @pytest.mark.parametrize("command", [
+        "cd $D && git add a.md",
+        "cd `pwd` && git add a.md",
+        "cd /tmp; git add a.md",
+        "cd /tmp || git add a.md",
+        "cd /does/not/exist && git add a.md",
+        "cd && git add a.md",
+        "cd -P /tmp && git add a.md",
+        "echo 'cd /tmp && git add -A'",
+        "cd /tmp\ngit add a.md",
+    ])
+    def test_anything_less_certain_is_not_resolved(self, command):
+        assert gate._literal_cd(command, "/x") is None, command
+
+    def test_the_gate_asks_the_cd_target_not_the_sessions_tree(
+            self, tree, tmp_path, monkeypatch, capsys):
+        other = tmp_path / "brand"
+        other.mkdir()
+        asked = []
+
+        def fake_ask(t, cwd_, paths=(), session=""):
+            asked.append(t)
+            # Only the session's own tree is shared; the target repo has no peers.
+            return [dict(SHARED, workdirs=[tree])] if t == tree else []
+
+        monkeypatch.setattr(gate, "ask", fake_ask)
+        payload = {"tool_input": {"command": f"cd {other} && git add -A"}, "cwd": tree,
+                   "session_id": "me-id"}
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+        assert gate.main() == 0
+        assert capsys.readouterr().out == ""
+        assert asked == [str(other)]
+
+
+class TestTheRefusalWhenTheTreeCannotBeNamed:
+    def test_it_offers_dash_C_instead_of_a_worktree(self, tree, monkeypatch, capsys):
+        denied, _ = run_gate(monkeypatch, capsys, "cd $REPO && git add a.md", tree, [SHARED])
+        assert denied and "git -C /literal/path" in denied
+        assert "git worktree add" not in denied

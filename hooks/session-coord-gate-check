@@ -441,6 +441,15 @@ def _no(reason):
 
 
 GLOB_CHARS = set("*?[")
+# Characters the gate cannot see through. Braces and backticks are expanded by the shell
+# before git runs, so `{a.md,b.md}` reached the board as one literal non-file while git staged
+# two (hostile pass on PR #5, finding 2). A backslash is git's pathspec escape, so `README\.md`
+# matched `README.md` in git while the claim lookup compared the escaped spelling (finding 3).
+OPAQUE_CHARS = set("{}`\\")
+
+# git's own switches for pathspec matching, which make a literal name match differently.
+PATHSPEC_ENV = ("GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
+                "GIT_LITERAL_PATHSPECS")
 
 # Options that change WHAT is staged rather than how, and so turn an explicit list into a
 # broad one. Named so the refusal can say why; anything not on an allow-list refuses anyway.
@@ -486,6 +495,9 @@ def _place(path, gitcwd, root):
         return None, f"`{path}` is a magic pathspec, which can match files nobody named"
     if GLOB_CHARS & set(path):
         return None, f"`{path}` is a glob, which can match files nobody named"
+    if OPAQUE_CHARS & set(path):
+        return None, (f"`{path}` contains a brace, backtick or backslash, which the shell or "
+                      "git rewrites before it names a file")
     if "$" in path or path.startswith("~"):
         return None, f"`{path}` was not expanded, so this cannot tell which file it is"
     full = os.path.normpath(os.path.join(gitcwd, path))
@@ -494,7 +506,28 @@ def _place(path, gitcwd, root):
         return None, f"`{path}` is not inside this working tree"
     if os.path.isdir(full):
         return None, f"`{path}` is a directory, which stages everything under it"
-    return rel.replace(os.sep, "/"), ""
+    rel = rel.replace(os.sep, "/")
+    if not os.path.lexists(full):
+        # Not on disk, so the filesystem cannot say what it was. A deleted tracked DIRECTORY
+        # is still a directory to git, and `git add gone` stages the deletion of everything
+        # under it (hostile pass on PR #5, finding 5). Ask the index; fail closed if it can't.
+        covered = _index_entries(root, rel)
+        if covered is None:
+            return None, f"`{path}` is not on disk and the index could not be read to place it"
+        if any(e != rel for e in covered):
+            return None, f"`{path}` was a directory, which stages everything under it"
+    return rel, ""
+
+
+def _index_entries(root, rel):
+    try:
+        out = subprocess.run(["git", "-C", root, "ls-files", "-z", "--", f":(literal){rel}"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return [e for e in out.stdout.split("\0") if e]
 
 
 def _parse_add(args, gitcwd, root):
@@ -589,12 +622,14 @@ def staging_form(command, cwd, root):
                    "`cd`, a `bash -c`, a variable or a git redirect is in the way. Run the git "
                    "command directly, from the session's own directory")
     root = os.path.realpath(root)
+    inherited = [v for v in PATHSPEC_ENV if os.environ.get(v)]
     paths, added, bare = [], [], False
-    for argv in segments:
-        argv, _ = _strip_prefix(argv)
+    for raw in segments:
+        argv, _ = _strip_prefix(raw)
         if not argv or os.path.basename(argv[0]) != "git":
             continue
-        gitcwd, i = os.path.realpath(cwd), 1
+        prefix = raw[:len(raw) - len(argv)]
+        gitcwd, i, opts = os.path.realpath(cwd), 1, []
         while i < len(argv) and argv[i].startswith("-"):
             tok = argv[i]
             if tok == "-C" and i + 1 < len(argv):
@@ -605,10 +640,22 @@ def staging_form(command, cwd, root):
                 gitcwd = os.path.realpath(os.path.join(gitcwd, tok[2:]))
                 i += 1
                 continue
+            opts.append(tok)
             key = tok.split("=", 1)[0]
             i += 2 if (key in GIT_OPTS_WITH_VALUE and "=" not in tok) else 1
         if i >= len(argv) or argv[i] not in WRITE_VERBS:
             continue
+        # git's global switches and its environment can make a literal name match something
+        # else -- `--icase-pathspecs`, `-c core.ignorecase=true`, `GIT_GLOB_PATHSPECS=1` -- so
+        # a staging command carrying any of them is not one the gate can read (hostile pass on
+        # PR #5, finding 3). `-C` is the one global option it understands.
+        if opts:
+            return _no(f"`git {opts[0]}` changes how git reads the paths that follow; use no "
+                       "global option but `-C`")
+        env = [t.split("=", 1)[0] for t in prefix if "=" in t and t.startswith("GIT_")]
+        if env or inherited:
+            return _no(f"`{(env or inherited)[0]}` is set, which changes how git matches the "
+                       "named paths")
         verb, rest = argv[i], argv[i + 1:]
         if verb == "add":
             got, why = _parse_add(rest, gitcwd, root)
@@ -657,13 +704,19 @@ def ask(tree, cwd, paths=(), session=""):
     -- or exited clean because the answer was about a tree nobody here shares.
     """
     argv = [str(CLI), "check", "--json", "--workdir", tree, "--repo-of", tree]
+    # `--path=<p>`, never `--path <p>`: argparse read a separate `-peer.md` as an option,
+    # exited 2 with nothing on stdout, and that parsed as "no findings" -- authorising a
+    # claimed file (hostile pass on PR #5, finding 1). `check --json` always prints a list, so
+    # empty output is a failure to ask, not an empty board.
     for p in paths:
-        argv += ["--path", p]
+        argv.append(f"--path={p}")
     if paths:
-        argv += ["--session", session or ""]
+        argv.append(f"--session={session or ''}")
     try:
         out = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=15)
-        found = json.loads(out.stdout or "[]")
+        if not out.stdout.strip():
+            return None
+        found = json.loads(out.stdout)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     return found if isinstance(found, list) else None
@@ -707,6 +760,19 @@ def main():
     if not CLI.exists():
         return 0
 
+    # A literal `cd /path && git ...` writes into /path exactly as `git -C /path` would, so it
+    # is resolved the same way before anything else looks. Without this the gate asked about
+    # the SESSION's tree, and a commit into an unrelated repo was refused with another repo's
+    # shared-tree finding and told to take a worktree there (2026-11-02, reported by the
+    # session that hit it).
+    try:
+        hop = _literal_cd(command, cwd)
+        while hop is not None:
+            cwd, command = hop
+            hop = _literal_cd(command, cwd)
+    except Exception:
+        pass
+
     try:
         is_write, workdir = analyse(command, cwd)
     except Exception:
@@ -749,7 +815,8 @@ def main():
         if not why:
             return 0
         return deny(_refusal(f, why))
-    return deny(_refusal(f, form.reason or "this command is not an explicit list of files"))
+    return deny(_refusal(f, form.reason or "this command is not an explicit list of files",
+                         named=workdir is not None))
 
 
 def _owned(form, tree, cwd, root, session):
@@ -775,7 +842,53 @@ def _owned(form, tree, cwd, root, session):
     return ""
 
 
-def _refusal(f, why):
+def _literal_cd(command, cwd):
+    """(new_cwd, rest) for `cd <literal dir> && <rest>`, else None.
+
+    Only the forms where the shell's behaviour is certain: one logical line, a bare `cd` with
+    exactly one argument and no options, joined by `&&` so the rest runs only if the `cd`
+    worked, to a directory that exists, whose name needs no expansion. Anything else -- `;`,
+    `||`, `$VAR`, a backtick, a missing directory -- stays unresolved, and the gate falls back
+    to asking about every tree it can name.
+    """
+    if "\n" in command.strip():
+        return None
+    quote, i, n = None, 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "\\":
+            i += 1
+        elif command.startswith("&&", i):
+            break
+        elif ch in ";|&()<>`$":
+            return None
+        i += 1
+    else:
+        return None
+    head, rest = command[:i], command[i + 2:]
+    try:
+        argv = shlex.split(head)
+    except ValueError:
+        return None
+    if len(argv) != 2 or argv[0] != "cd" or argv[1].startswith("-"):
+        return None
+    target = argv[1]
+    if target.startswith("~"):
+        target = os.path.expanduser(target)
+    if any(c in target for c in "$`*?[{}~"):
+        return None
+    target = os.path.normpath(os.path.join(cwd, target))
+    if not os.path.isdir(target):
+        return None
+    return target, rest
+
+
+def _refusal(f, why, named=True):
     who = os.environ.get("SESSION_COORD_USER", "").strip() or "the user"
     others = ", ".join(str(s) for s in (f.get("sessions") or [])) or "another session"
     by_design = f.get("severity") != "block"
@@ -786,7 +899,17 @@ def _refusal(f, why):
         "it -- that came within one commit of being real in a private infra repo on 2026-09-17, "
         "and `git clean` would have destroyed the untracked half outright.\n\n"
     )
-    if by_design:
+    if not named:
+        # The gate could not tell where the write lands, so it asked about the session's own
+        # tree -- which may be a different repo from the one the command meant. A worktree is
+        # the wrong advice for that; naming the tree is the right one.
+        text += (
+            "The gate could not tell which tree this command writes to, so it checked this "
+            "session's own. If the command is meant for a different repo, name it literally: "
+            "`git -C /literal/path add <file>`, or `cd /literal/path && git ...`, and the gate "
+            "checks that tree instead.\n\n"
+        )
+    elif by_design:
         text += f"What this gate accepts here: {f.get('remedy', '')}\n\n"
     else:
         text += (

@@ -13,6 +13,7 @@ Pure. Everything comes in on the `Board`; nothing here shells out.
 
 from __future__ import annotations
 
+import fnmatch
 import posixpath
 from collections import defaultdict
 from typing import Iterable, Sequence
@@ -169,6 +170,23 @@ def _claim_relative(claim: str, workdir: str) -> str | None:
     return None
 
 
+def _claim_covers(claim: str, path: str) -> bool:
+    """True when `claim` could govern `path`. Errs toward True; a false hit only refuses.
+
+    Prefix overlap alone ignored any glob before the last segment, so `*.md` and
+    `docs/*/secret.md` protected nothing (hostile pass on PR #5, finding 4). `fnmatch` lets
+    `*` cross `/`, which over-matches -- the safe direction for a check that authorises.
+    Compared casefolded, because on a case-insensitive filesystem `readme.md` IS `README.md`.
+    """
+    c, p = claim.strip().casefold(), path.strip().strip("/").casefold()
+    if _claims_overlap(c, p):
+        return True
+    if any(ch in c for ch in "*?["):
+        pat = c.strip("/")
+        return fnmatch.fnmatchcase(p, pat) or fnmatch.fnmatchcase(p, pat + "/*")
+    return False
+
+
 def claimed_paths(board: Board, workdir: str, session_id: str,
                   paths: Iterable[str]) -> list[Finding]:
     """A finding for each named path that another session in `workdir` has claimed.
@@ -188,7 +206,7 @@ def claimed_paths(board: Board, workdir: str, session_id: str,
         for s in peers:
             hit = next((c for c in s.claims
                         if (rel := _claim_relative(c, here)) is not None
-                        and _claims_overlap(rel, path)), None)
+                        and _claim_covers(rel, path)), None)
             if hit is None:
                 continue
             out.append(Finding(
