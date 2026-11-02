@@ -278,6 +278,10 @@ class TestHostileRoundOne:
         "git -c core.ignorecase=true add a.md",
         "GIT_ICASE_PATHSPECS=1 git add a.md",
         "GIT_GLOB_PATHSPECS=1 git add a.md",
+        # Raised by a cross-model review of the fix diff; already refused, pinned so it stays.
+        "env GIT_GLOB_PATHSPECS=1 git add a.md",
+        "env -i GIT_ICASE_PATHSPECS=1 git add a.md",
+        "sudo GIT_GLOB_PATHSPECS=1 git add a.md",
         "git add 'README\\.md'",
         # 5: a deleted tracked directory is not on disk, but git still reads it as a directory.
         "git add gone",
