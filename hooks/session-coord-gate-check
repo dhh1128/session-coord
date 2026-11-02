@@ -106,6 +106,22 @@ WRAPPER_RELOCATES = {"env": {"-C", "--chdir", "-S", "--split-string"},
                      "sudo": {"-D", "--chdir", "-R", "--chroot", "-i", "--login"}}
 
 
+def _mentions_git_write(tokens):
+    """True when the tokens could still run a git write: `git` (by basename) followed, in the
+    same token or a later one, by a write verb. The backstop for a wrapper this could not fully
+    read. Bare mention of the word -- `printf git`, `grep -r git .` -- is not enough, because
+    refusing those in a shared tree is the false refusal that gets a gate switched off (hostile
+    fix pass on PR #5)."""
+    words = [w for t in tokens for w in t.split()]
+    for k, w in enumerate(words):
+        # An option's attached value can be the command: `--split=git add -A`, `-iSgit add`.
+        is_git = (os.path.basename(w.split("=", 1)[-1]) == "git"
+                  or (w.startswith("-") and w.endswith("git")))
+        if is_git and any(v in WRITE_VERBS for v in words[k + 1:]):
+            return True
+    return False
+
+
 def _long_option(name, key):
     """`key` as the wrapper's full long option, the way GNU getopt reads it.
 
@@ -313,9 +329,23 @@ def _strip_prefix_ex(argv):
                 if opt == "--":
                     i += 1
                     break
+                if not opt.startswith("--") and len(opt) > 2:
+                    # A short cluster: `-iC/tmp`, `-Eu daniel`. Walk it the way getopt does --
+                    # each letter an option until one takes a value, which is the rest of the
+                    # cluster or, if none is left, the next token. Reading only the first
+                    # letter hid `-C` inside `-iC/tmp` (hostile fix pass on PR #5).
+                    for j, ch in enumerate(opt[1:], 1):
+                        flag = "-" + ch
+                        if flag in moves:
+                            redirects = True
+                        if flag in valued:
+                            if j == len(opt) - 1 and i + 1 < len(argv):
+                                i += 1
+                            break
+                    i += 1
+                    continue
                 key, ambiguous = _long_option(name, opt.split("=", 1)[0])
-                short = opt[:2] if not opt.startswith("--") else key
-                if ambiguous or key in moves or short in moves:
+                if ambiguous or key in moves:
                     redirects = True
                 if key in valued and "=" not in opt and i + 1 < len(argv):
                     i += 1  # the flag's value, e.g. `sudo -u daniel`
@@ -444,7 +474,7 @@ def analyse(command, cwd):
 
     for raw in segments:
         argv, env_redirect, wrapped = _strip_prefix_ex(raw)
-        if wrapped and env_redirect and any("git" in t for t in raw) and (
+        if wrapped and env_redirect and _mentions_git_write(raw) and (
                 not argv or os.path.basename(argv[0]) != "git"):
             # `env -S 'git add -A'` carries the command as an option's value.
             write, uncertain = True, True
@@ -452,7 +482,7 @@ def analyse(command, cwd):
         if not argv:
             continue
         name = os.path.basename(argv[0])
-        if wrapped and name != "git" and any("git" in t for t in argv):
+        if wrapped and name != "git" and _mentions_git_write(argv):
             # A wrapper this cannot fully read left something other than git in front, with
             # git still in the command: assume a write in a tree nobody can name, rather than
             # missing it the way `env -i git add -A` was missed.
@@ -714,11 +744,11 @@ def staging_form(command, cwd, root):
     paths, added, bare = [], [], False
     for raw in segments:
         argv, moved, wrapped = _strip_prefix_ex(raw)
-        if wrapped and moved and any("git" in t for t in raw):
+        if wrapped and moved and _mentions_git_write(raw):
             return _no("a wrapper option moves where git runs, or carries the command as a "
                        "string; run git directly")
-        if wrapped and argv and os.path.basename(argv[0]) != "git" and any(
-                "git" in t for t in argv):
+        if wrapped and argv and os.path.basename(argv[0]) != "git" and _mentions_git_write(
+                argv):
             return _no(f"`{' '.join(raw[:3])} ...` hides the git command behind a wrapper this "
                        "gate cannot read; run git directly")
         if not argv or os.path.basename(argv[0]) != "git":

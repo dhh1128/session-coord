@@ -462,3 +462,34 @@ class TestWrapperLongOptionAbbreviations:
     def test_an_abbreviated_valued_option_still_skips_its_value(self):
         # `--us GIT` is `--unset GIT`; the value must be skipped so `git` is found.
         assert gate.analyse("env --us GIT git add -A", "/repo")[0]
+
+
+class TestHostileFixPassTwo:
+    """codex's fix-diff pass over e000691..31fe757."""
+
+    @pytest.mark.parametrize("command", [
+        "env -iC/tmp git add a.md",
+        "env -iC /tmp git add a.md",
+        "sudo -ED/tmp git add a.md",
+        "env -iS'git add -A'",
+    ])
+    def test_a_relocation_inside_a_short_cluster_is_seen(self, command):
+        assert gate.analyse(command, "/repo") == (True, None), command
+
+    def test_a_valued_short_option_in_a_cluster_takes_the_next_token(self):
+        # `sudo -Eu daniel git add -A`: -E, then -u takes `daniel`.
+        assert gate.analyse("sudo -Eu daniel git add -A", "/repo") == (True, "/repo")
+
+    @pytest.mark.parametrize("command", [
+        "env /usr/bin/printf git",
+        "env grep -r git .",
+        "nice -n 5 grep gitignore README.md",
+        "timeout 5 echo git status",
+    ])
+    def test_a_wrapped_command_that_merely_mentions_git_is_not_a_write(self, command):
+        assert not gate.analyse(command, "/repo")[0], command
+
+    def test_but_a_wrapped_git_write_behind_an_unknown_option_still_is(self):
+        # An option this does not know may have eaten the wrong token; git and a write verb
+        # still in the command is enough to assume a write.
+        assert gate.analyse("sudo --unknown-thing value git add -A", "/repo")[0]
