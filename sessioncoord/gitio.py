@@ -99,6 +99,21 @@ def dirty_paths(path: str, run: Runner = _run) -> tuple[str, ...]:
     return tuple(line[3:] for line in out.splitlines() if len(line) > 3)
 
 
+#: A repo whose owner wants sessions to share the main checkout -- a docs repo that commits
+#: straight to main, say -- declares it with this file at its root. It counts only when it is
+#: on the REMOTE's default branch: creating a file, or even committing one locally, is
+#: something a session can do to itself without anyone noticing, and pushing to the default
+#: branch is not. 2026-11-02: the gate refused explicit commits in such a repo and told the
+#: session to take a worktree, which contradicted the repo's own rule.
+SHARED_CHECKOUT_MARKER = ".session-coord-shared-checkout"
+
+
+def shared_checkout(repo: str, default: str, run: Runner = _run) -> bool:
+    """True only when the marker is in `origin/<default>`. Any failure to look is False."""
+    ref = f"origin/{default}:{SHARED_CHECKOUT_MARKER}"
+    return bool(run(["git", "cat-file", "-t", ref], repo) == "blob")
+
+
 def facts(repo: str, run: Runner = _run) -> RepoFacts:
     """One gather, passed to the detectors. Nothing re-queries git downstream.
 
@@ -116,4 +131,5 @@ def facts(repo: str, run: Runner = _run) -> RepoFacts:
         remote_default_sha=run(
             ["git", "rev-parse", "--verify", "--quiet", f"origin/{dflt}"], repo),
         dirty_paths=dirty_paths(repo, run),
+        shared_checkout=shared_checkout(repo, dflt, run),
     )

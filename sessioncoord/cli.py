@@ -348,7 +348,8 @@ def cmd_check(args) -> int:
     if repo is None:
         print("session-coord: not a git repo.", file=sys.stderr)
         return 0
-    findings = detect.check(_live_board(repo))
+    board = _live_board(repo)
+    findings = detect.check(board)
     if args.workdir:
         # Scope to the caller's own tree. The PreToolUse gate asks this question on behalf of
         # ONE session, and repo-wide findings would refuse a session sitting safely in its own
@@ -360,6 +361,12 @@ def cmd_check(args) -> int:
         # shared-tree blocker, and allowed the staging command -- fail-open, again.
         here = gitio.workdir(os.path.expanduser(args.workdir)).rstrip("/")
         findings = [f for f in findings if not f.workdirs or here in f.workdirs]
+        if args.path:
+            # The gate's question for an explicit `git add`/`git commit` in a shared tree:
+            # does any PEER in this tree claim one of these files? Paths arrive relative to
+            # the tree root. 2026-11-02, the docs-repo incident.
+            findings = findings + detect.claimed_paths(
+                board, here, args.session or "", args.path)
     if args.json:
         print(json.dumps([{"code": f.code, "severity": f.severity, "summary": f.summary,
                            "detail": f.detail, "remedy": f.remedy,
@@ -1234,6 +1241,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="resolve the repo from this path rather than from cwd")
     c.add_argument("--quiet", action="store_true", help="print only blocking findings")
     c.add_argument("--json", action="store_true")
+    c.add_argument("--path", action="append", default=[],
+                   help="with --workdir: report any of these tree-relative paths a peer claims")
+    c.add_argument("--session", default="",
+                   help="with --path: the asking session, whose own claims are excused")
     c.set_defaults(func=cmd_check)
 
     s = sub.add_parser("sweep", help="drop records whose session is gone")
