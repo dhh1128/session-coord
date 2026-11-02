@@ -103,6 +103,20 @@ class TestIsClaudeWithoutProc:
             tmuxio._is_claude(40)
 
 
+    @pytest.mark.parametrize("args", [
+        "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+        "node /Users/x/.npm-global/bin/claude --resume",
+        "bun /Users/x/.bun/bin/claude",
+    ])
+    def test_an_npm_or_bun_claude_is_recognised(self, no_proc, monkeypatch, args):
+        # Hostile pass on PR #6: these ran as "node"/"bun", so a comm-and-argv[0] check read a
+        # live session as absent, where before this branch the whole tree was unknown and the
+        # record was kept. procio.is_claude already knew these shapes.
+        fake_ps(monkeypatch, {("-o", "comm=", "-p", "40"): (0, args.split()[0] + "\n"),
+                              ("-o", "args=", "-p", "40"): (0, args + "\n")})
+        assert tmuxio._is_claude(40) is True
+
+
 class TestPidExitedWithoutProc:
     def test_a_missing_pid_has_exited(self, no_proc, monkeypatch):
         monkeypatch.setattr(tmuxio.os, "kill", _raises(ProcessLookupError()))

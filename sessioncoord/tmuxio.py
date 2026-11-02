@@ -198,7 +198,10 @@ def _is_claude_from_ps(pid: int) -> bool:
         if _signal_probe(pid) is False:
             return False
         raise Unknown(f"ps could not read the argv of live pid {pid}")
-    return bool(argv) and os.path.basename(argv[0]) == "claude"
+    # procio.is_claude, not a basename check: an npm or bun install runs as `node`/`bun` with
+    # claude in the first argument, and reading that live session as absent would let a sweep
+    # delete its record (hostile pass on PR #6).
+    return procio.is_claude(argv)
 
 
 def claude_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":
