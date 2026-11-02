@@ -493,3 +493,21 @@ class TestHostileFixPassTwo:
         # An option this does not know may have eaten the wrong token; git and a write verb
         # still in the command is enough to assume a write.
         assert gate.analyse("sudo --unknown-thing value git add -A", "/repo")[0]
+
+
+class TestHostileFixPassThree:
+    @pytest.mark.parametrize("command", [
+        """env -S 'git "add" -A'""",
+        """env -S '"git" add -A'""",
+        """env -S 'g""it add -A'""",
+        r"""env -S 'git\_add\_-A'""",
+        """env --split-string='git "commit" -a -m x'""",
+    ])
+    def test_quoting_inside_a_split_string_does_not_hide_the_write(self, command):
+        assert gate.analyse(command, "/repo") == (True, None), command
+
+    def test_and_the_explicit_rule_refuses_it(self, tree):
+        assert not form("""env -S 'git "add" a.md'""", tree).ok
+
+    def test_a_dequoted_write_behind_an_unknown_option_is_still_found(self):
+        assert gate.analyse("""sudo --unknown x '"git"' add -A""", "/repo")[0]

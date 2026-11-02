@@ -112,7 +112,12 @@ def _mentions_git_write(tokens):
     read. Bare mention of the word -- `printf git`, `grep -r git .` -- is not enough, because
     refusing those in a shared tree is the false refusal that gets a gate switched off (hostile
     fix pass on PR #5)."""
-    words = [w for t in tokens for w in t.split()]
+    words = []
+    for t in tokens:
+        try:
+            words += shlex.split(t)
+        except ValueError:
+            words += t.split()
     for k, w in enumerate(words):
         # An option's attached value can be the command: `--split=git add -A`, `-iSgit add`.
         is_git = (os.path.basename(w.split("=", 1)[-1]) == "git"
@@ -120,6 +125,15 @@ def _mentions_git_write(tokens):
         if is_git and any(v in WRITE_VERBS for v in words[k + 1:]):
             return True
     return False
+
+
+def _mentions_git(tokens):
+    """Any `git` at all, spelling aside. For a wrapper that relocates the command or carries it
+    as a string (`env -C`, `env -S`), which re-parses its argument with quoting and escapes of
+    its own: `env -S 'git "add" -A'` hid its verb from a whitespace split (hostile fix pass on
+    PR #5). Nothing reads such a command reliably, so mentioning git is enough to refuse."""
+    text = "".join(tokens).replace('"', "").replace("'", "").replace("\\", "")
+    return "git" in text
 
 
 def _long_option(name, key):
@@ -474,7 +488,7 @@ def analyse(command, cwd):
 
     for raw in segments:
         argv, env_redirect, wrapped = _strip_prefix_ex(raw)
-        if wrapped and env_redirect and _mentions_git_write(raw) and (
+        if wrapped and env_redirect and _mentions_git(raw) and (
                 not argv or os.path.basename(argv[0]) != "git"):
             # `env -S 'git add -A'` carries the command as an option's value.
             write, uncertain = True, True
@@ -744,7 +758,7 @@ def staging_form(command, cwd, root):
     paths, added, bare = [], [], False
     for raw in segments:
         argv, moved, wrapped = _strip_prefix_ex(raw)
-        if wrapped and moved and _mentions_git_write(raw):
+        if wrapped and moved and _mentions_git(raw):
             return _no("a wrapper option moves where git runs, or carries the command as a "
                        "string; run git directly")
         if wrapped and argv and os.path.basename(argv[0]) != "git" and _mentions_git_write(
