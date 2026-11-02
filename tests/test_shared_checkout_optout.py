@@ -97,6 +97,15 @@ class TestClaimedPaths:
         b = board(me=(), peer=("README.md",))
         assert detect.claimed_paths(b, REPO, "me", ["readme.md"])
 
+    def test_an_absolute_claim_is_normalised_before_it_is_placed(self):
+        # Copilot on PR #5: `/repo/../repo/docs/**` read as outside the tree.
+        b = board(me=(), peer=(REPO + "/../repo/docs/**",))
+        assert detect.claimed_paths(b, REPO, "me", ["docs/x.md"])
+
+    def test_a_dot_slash_glob_claim_matches(self):
+        b = board(me=(), peer=("./docs/*.md",))
+        assert detect.claimed_paths(b, REPO, "me", ["docs/x.md"])
+
     def test_a_sibling_name_is_not_inside_a_claimed_directory(self):
         b = board(me=(), peer=("docs/cyber/**",))
         assert detect.claimed_paths(b, REPO, "me", ["docs/cyberpunk.md"]) == []

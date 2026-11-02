@@ -384,3 +384,51 @@ class TestTheRefusalWhenTheTreeCannotBeNamed:
         denied, _ = run_gate(monkeypatch, capsys, "cd $REPO && git add a.md", tree, [SHARED])
         assert denied and "git -C /literal/path" in denied
         assert "git worktree add" not in denied
+
+
+class TestCopilotRoundOne:
+    """Copilot's review of PR #5. Each case was a fail-open in the allow path."""
+
+    @pytest.mark.parametrize("command", [
+        # A dry run or intent-to-add stages nothing, so it cannot vouch for a bare commit.
+        "git add -n a.md && git commit -m x",
+        "git add --dry-run a.md && git commit -m x",
+        "git add -N a.md && git commit -m x",
+    ])
+    def test_a_non_staging_add_does_not_license_a_bare_commit(self, tree, command):
+        assert not form(command, tree).ok, command
+
+    def test_a_bare_commit_does_not_inherit_an_earlier_dash_C(self, tree, tmp_path):
+        other = tmp_path / "other"
+        other.mkdir()
+        cmd = f"git -C {other} add a.md && git commit -m x"
+        assert gate.analyse(cmd, tree)[1] is None  # two trees, so the tree cannot be named
+        assert not form(cmd, tree).ok
+
+    @pytest.mark.parametrize("command", [
+        "env -i git add -A",
+        "env -i git commit -a -m x",
+        "sudo -E git add -A",
+        "timeout 10 git add -A",
+        "nice -n 5 git add -A",
+        "stdbuf -oL git add -A",
+    ])
+    def test_wrappers_with_valueless_flags_still_expose_the_write(self, command):
+        assert gate.analyse(command, "/repo")[0], command
+
+    def test_a_wrapped_commit_still_counts_as_a_bare_commit(self, tree):
+        # It used to be skipped, so `bare` stayed False and the index was never read. Now it
+        # is a bare commit like any other, and `_owned` checks the index before allowing it.
+        f = form("git add a.md && env -i git commit -m x", tree)
+        assert f.ok and f.bare_commit
+
+    def test_a_wrapper_hiding_git_behind_a_split_string_refuses(self, tree):
+        assert not form("git add a.md && env -S 'git commit -a -m x'", tree).ok
+
+    @pytest.mark.parametrize("command", [
+        "env --chdir=/other git add a.md",
+        "env -C /other git add a.md",
+        "sudo -D /other git add a.md",
+    ])
+    def test_a_wrapper_that_changes_directory_unnames_the_tree(self, command):
+        assert gate.analyse(command, "/repo") == (True, None), command

@@ -159,10 +159,12 @@ def _claim_relative(claim: str, workdir: str) -> str | None:
     Claims are usually repo-relative (`docs/**`), but sessions also claim absolute paths, and
     an absolute claim outside this tree says nothing about it.
     """
-    c = claim.strip()
+    # Normalised lexically first: `/repo/../repo/docs/**` and `./docs/*.md` are ordinary
+    # spellings of claims, and the gate normalises the paths it asks about (Copilot on PR #5).
+    c = posixpath.normpath(claim.strip())
     if not posixpath.isabs(c):
         return c
-    root = workdir.rstrip("/")
+    root = posixpath.normpath(workdir)
     if c.rstrip("/") == root or c.rstrip("/*") == root:
         return "**"
     if c.startswith(root + "/"):

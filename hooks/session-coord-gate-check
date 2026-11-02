@@ -83,6 +83,28 @@ WRAPPERS = {
 }
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 
+# Which of each wrapper's options take a SEPARATE value. Treating every option of a wrapper as
+# valued -- the old rule -- made `env -i git add -A` and `sudo -E git add -A` read `git` as the
+# flag's value and miss the write entirely (Copilot on PR #5). Anything not listed is valueless.
+WRAPPER_VALUED = {
+    "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C",
+             "--close-from", "-D", "--chdir", "-r", "--role", "-t", "--type", "-U",
+             "--other-user", "-T", "--command-timeout", "-R", "--chroot"},
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u",
+               "--uid"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "doas": {"-u", "-C"},
+}
+# Positional arguments a wrapper takes before the command: `timeout 10 git ...`.
+WRAPPER_POSITIONALS = {"timeout": 1}
+# Options that run the command somewhere else, or hand it over as a string. Either way the tree
+# the write lands in is no longer the one this can name (`env --chdir=/other git add a.md`).
+WRAPPER_RELOCATES = {"env": {"-C", "--chdir", "-S", "--split-string"},
+                     "sudo": {"-D", "--chdir", "-R", "--chroot"}}
+
 # git's own options, before the subcommand. Those that take a separate value must be known, or
 # their value gets read as the subcommand.
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
@@ -245,7 +267,13 @@ def _segments(command):
 
 def _strip_prefix(argv):
     """Drop leading assignments and wrappers. Returns (argv, env_redirects_seen)."""
-    redirects = False
+    rest, redirects, _ = _strip_prefix_ex(argv)
+    return rest, redirects
+
+
+def _strip_prefix_ex(argv):
+    """(argv, redirected, wrapped): `_strip_prefix`, plus whether any wrapper was removed."""
+    redirects, wrapped = False, False
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -256,15 +284,26 @@ def _strip_prefix(argv):
             continue
         name = os.path.basename(tok)
         if name in WRAPPERS:
-            takes_value = WRAPPERS[name]
+            wrapped = True
+            valued = WRAPPER_VALUED.get(name, set())
+            moves = WRAPPER_RELOCATES.get(name, set())
             i += 1
             while i < len(argv) and argv[i].startswith("-"):
-                if takes_value and "=" not in argv[i] and i + 1 < len(argv):
+                opt = argv[i]
+                if opt == "--":
+                    i += 1
+                    break
+                key = opt.split("=", 1)[0]
+                short = opt[:2] if not opt.startswith("--") else key
+                if key in moves or short in moves:
+                    redirects = True
+                if key in valued and "=" not in opt and i + 1 < len(argv):
                     i += 1  # the flag's value, e.g. `sudo -u daniel`
                 i += 1
+            i += WRAPPER_POSITIONALS.get(name, 0)
             continue
         break
-    return argv[i:], redirects
+    return argv[i:], redirects, wrapped
 
 
 def _git_write(argv):
@@ -379,11 +418,26 @@ def analyse(command, cwd):
             return True, None
         return False, None
     write, tree, uncertain = False, None, False
-    for argv in segments:
-        argv, env_redirect = _strip_prefix(argv)
+
+    def _abs(p):
+        return os.path.normpath(os.path.join(cwd, p))
+
+    for raw in segments:
+        argv, env_redirect, wrapped = _strip_prefix_ex(raw)
+        if wrapped and env_redirect and any("git" in t for t in raw) and (
+                not argv or os.path.basename(argv[0]) != "git"):
+            # `env -S 'git add -A'` carries the command as an option's value.
+            write, uncertain = True, True
+            continue
         if not argv:
             continue
         name = os.path.basename(argv[0])
+        if wrapped and name != "git" and any("git" in t for t in argv):
+            # A wrapper this cannot fully read left something other than git in front, with
+            # git still in the command: assume a write in a tree nobody can name, rather than
+            # missing it the way `env -i git add -A` was missed.
+            write, uncertain = True, True
+            continue
         if name in SHELLS:
             # `bash -c 'git add -A'`. Recurse into the script rather than giving up, but never
             # trust the outer cwd for it -- a nested `cd` is invisible from here.
@@ -401,12 +455,16 @@ def analyse(command, cwd):
             write = True
             if env_redirect or redirected:
                 uncertain = True
-            elif explicit is not None:
-                tree = explicit if tree in (None, explicit) else None
-                if tree is None:
-                    uncertain = True
-            elif tree is None and not uncertain:
-                tree = cwd
+            else:
+                # Each write's own tree: its `-C`, or the shell's cwd. A later write does NOT
+                # inherit an earlier segment's `-C` -- `git -C /other add a && git commit`
+                # commits in THIS tree -- so two different trees means none can be named
+                # (Copilot on PR #5).
+                here = explicit if explicit is not None else cwd
+                if tree is None and not uncertain:
+                    tree = here
+                elif tree is not None and _abs(tree) != _abs(here):
+                    tree, uncertain = None, True
     if not write:
         return False, None
     if uncertain or tree is None:
@@ -531,6 +589,16 @@ def _index_entries(root, rel):
 
 
 def _parse_add(args, gitcwd, root):
+    """(paths, why, stages). `stages` is False for `-n`/`-N`, which put no content in the
+    index and so cannot vouch for a bare commit after them (Copilot on PR #5)."""
+    paths, why = _parse_add_paths(args, gitcwd, root)
+    opts = [t for t in (args[:args.index("--")] if "--" in args else args) if t.startswith("-")]
+    stages = not any(t in ("-n", "--dry-run", "-N", "--intent-to-add")
+                     or (not t.startswith("--") and set(t[1:]) & set("nN")) for t in opts)
+    return paths, why, stages
+
+
+def _parse_add_paths(args, gitcwd, root):
     paths, dashdash = [], False
     for tok in args:
         if not dashdash and tok == "--":
@@ -625,9 +693,18 @@ def staging_form(command, cwd, root):
     inherited = [v for v in PATHSPEC_ENV if os.environ.get(v)]
     paths, added, bare = [], [], False
     for raw in segments:
-        argv, _ = _strip_prefix(raw)
+        argv, moved, wrapped = _strip_prefix_ex(raw)
+        if wrapped and moved and any("git" in t for t in raw):
+            return _no("a wrapper option moves where git runs, or carries the command as a "
+                       "string; run git directly")
+        if wrapped and argv and os.path.basename(argv[0]) != "git" and any(
+                "git" in t for t in argv):
+            return _no(f"`{' '.join(raw[:3])} ...` hides the git command behind a wrapper this "
+                       "gate cannot read; run git directly")
         if not argv or os.path.basename(argv[0]) != "git":
             continue
+        if moved:
+            return _no("a wrapper option moves where git runs; run git directly")
         prefix = raw[:len(raw) - len(argv)]
         gitcwd, i, opts = os.path.realpath(cwd), 1, []
         while i < len(argv) and argv[i].startswith("-"):
@@ -658,10 +735,11 @@ def staging_form(command, cwd, root):
                        "named paths")
         verb, rest = argv[i], argv[i + 1:]
         if verb == "add":
-            got, why = _parse_add(rest, gitcwd, root)
+            got, why, stages = _parse_add(rest, gitcwd, root)
             if got is None:
                 return _no(why)
-            added += got
+            if stages:
+                added += got
             paths += got
         elif verb == "commit":
             got, why = _parse_commit(rest, gitcwd, root)
