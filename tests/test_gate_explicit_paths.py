@@ -516,7 +516,7 @@ class TestHostileFixPassThree:
 class TestHostileFixPassFour:
     @pytest.mark.parametrize("command", [
         "env -C / printf digital-camera",
-        "env -S 'echo legit amend'",
+        "env -C / echo legit amend",
         "sudo -i cat .gitignore",
     ])
     def test_git_inside_another_word_is_not_git(self, command):
@@ -528,4 +528,19 @@ class TestHostileFixPassFour:
         r"""env -S 'git\_add\_-A'""",
     ])
     def test_but_git_as_a_word_still_is(self, command):
+        assert gate.analyse(command, "/repo") == (True, None), command
+
+
+class TestASplitStringIsNeverRead:
+    """kimi on the final fix: `env -S 'git\\cX' add -A` runs `git add -A`, because env -S
+    treats `\\c` as the end of the string. env -S has a small language of its own, so the gate
+    stops trying to read it: any -S/--split-string is a write into a tree it cannot name."""
+
+    @pytest.mark.parametrize("command", [
+        r"env -S 'git\cX' add -A",
+        r"env -iS'git\cX' add -A",
+        r"env --split='g\cit' add -A",
+        "env -S 'anything at all'",
+    ])
+    def test_any_split_string(self, command):
         assert gate.analyse(command, "/repo") == (True, None), command

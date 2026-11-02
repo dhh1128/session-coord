@@ -103,6 +103,10 @@ WRAPPER_VALUED = {
 WRAPPER_POSITIONALS = {"timeout": 1}
 # Options that run the command somewhere else, or hand it over as a string. Either way the tree
 # the write lands in is no longer the one this can name (`env --chdir=/other git add a.md`).
+# Options whose value is itself a command line in a language this cannot read: env -S has
+# quoting, escapes and `\c` (end of string) of its own, and `env -S 'git\cX' add -A` runs
+# `git add -A` (a cross-model review of PR #5). Any use of one makes the segment unreadable.
+WRAPPER_STRINGS = {"env": {"-S", "--split-string"}}
 WRAPPER_RELOCATES = {"env": {"-C", "--chdir", "-S", "--split-string"},
                      "sudo": {"-D", "--chdir", "-R", "--chroot", "-i", "--login"}}
 
@@ -329,7 +333,7 @@ def _strip_prefix(argv):
 
 def _strip_prefix_ex(argv):
     """(argv, redirected, wrapped): `_strip_prefix`, plus whether any wrapper was removed."""
-    redirects, wrapped = False, False
+    redirects, wrapped, unreadable = False, False, False
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -356,6 +360,8 @@ def _strip_prefix_ex(argv):
                     # letter hid `-C` inside `-iC/tmp` (hostile fix pass on PR #5).
                     for j, ch in enumerate(opt[1:], 1):
                         flag = "-" + ch
+                        if flag in WRAPPER_STRINGS.get(name, set()):
+                            unreadable = True
                         if flag in moves:
                             redirects = True
                         if flag in valued:
@@ -365,6 +371,8 @@ def _strip_prefix_ex(argv):
                     i += 1
                     continue
                 key, ambiguous = _long_option(name, opt.split("=", 1)[0])
+                if key in WRAPPER_STRINGS.get(name, set()):
+                    unreadable = True
                 if ambiguous or key in moves:
                     redirects = True
                 if key in valued and "=" not in opt and i + 1 < len(argv):
@@ -373,6 +381,8 @@ def _strip_prefix_ex(argv):
             i += WRAPPER_POSITIONALS.get(name, 0)
             continue
         break
+    if unreadable:
+        return argv[i:], "unreadable", wrapped
     return argv[i:], redirects, wrapped
 
 
@@ -494,6 +504,9 @@ def analyse(command, cwd):
 
     for raw in segments:
         argv, env_redirect, wrapped = _strip_prefix_ex(raw)
+        if env_redirect == "unreadable":
+            write, uncertain = True, True
+            continue
         if wrapped and env_redirect and _mentions_git(raw) and (
                 not argv or os.path.basename(argv[0]) != "git"):
             # `env -S 'git add -A'` carries the command as an option's value.
@@ -764,7 +777,7 @@ def staging_form(command, cwd, root):
     paths, added, bare = [], [], False
     for raw in segments:
         argv, moved, wrapped = _strip_prefix_ex(raw)
-        if wrapped and moved and _mentions_git(raw):
+        if moved == "unreadable" or (wrapped and moved and _mentions_git(raw)):
             return _no("a wrapper option moves where git runs, or carries the command as a "
                        "string; run git directly")
         if wrapped and argv and os.path.basename(argv[0]) != "git" and _mentions_git_write(
