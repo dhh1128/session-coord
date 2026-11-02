@@ -82,6 +82,9 @@ class TestProcio:
         (["node", "/work/claude-code-dashboard/server.js"], False),
         (["bun", "/work/my-claude-code-tools/index.ts"], False),
         (["node", "/Users/x/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.mjs"], True),
+        # Launched from inside node_modules with a relative script path (hostile fix pass p3.1).
+        (["node", "@anthropic-ai/claude-code/cli.js"], True),
+        (["node", "node_modules/@anthropic-ai/claude-code/cli.js"], True),
         (["bash"], False),
         ([], False),
     ])
