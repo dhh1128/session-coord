@@ -432,3 +432,33 @@ class TestCopilotRoundOne:
     ])
     def test_a_wrapper_that_changes_directory_unnames_the_tree(self, command):
         assert gate.analyse(command, "/repo") == (True, None), command
+
+
+class TestWrapperLongOptionAbbreviations:
+    """A cross-model review (glm) of the Copilot fixes: GNU getopt accepts any unique prefix
+    of a long option, so `--split` is `--split-string` and `--ch` is `--chdir`, and exact-match
+    tables let both through."""
+
+    @pytest.mark.parametrize("command", [
+        "env --split='git add -A'",
+        "env --spl='git add -A'",
+        "env --ch=sub git add a.md",
+        "env --chd sub git add a.md",
+        "sudo --ch=sub git add a.md",
+        "sudo -i git add a.md",
+        "sudo --login git add a.md",
+    ])
+    def test_an_abbreviated_relocation_unnames_the_tree(self, command):
+        assert gate.analyse(command, "/repo") == (True, None), command
+
+    @pytest.mark.parametrize("command", [
+        "env --split='git add a.md'",
+        "env --ch=sub git add a.md",
+        "sudo -i git add a.md",
+    ])
+    def test_and_the_explicit_rule_refuses_it(self, tree, command):
+        assert not form(command, tree).ok, command
+
+    def test_an_abbreviated_valued_option_still_skips_its_value(self):
+        # `--us GIT` is `--unset GIT`; the value must be skipped so `git` is found.
+        assert gate.analyse("env --us GIT git add -A", "/repo")[0]

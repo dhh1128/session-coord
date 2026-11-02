@@ -103,7 +103,27 @@ WRAPPER_POSITIONALS = {"timeout": 1}
 # Options that run the command somewhere else, or hand it over as a string. Either way the tree
 # the write lands in is no longer the one this can name (`env --chdir=/other git add a.md`).
 WRAPPER_RELOCATES = {"env": {"-C", "--chdir", "-S", "--split-string"},
-                     "sudo": {"-D", "--chdir", "-R", "--chroot"}}
+                     "sudo": {"-D", "--chdir", "-R", "--chroot", "-i", "--login"}}
+
+
+def _long_option(name, key):
+    """`key` as the wrapper's full long option, the way GNU getopt reads it.
+
+    getopt accepts any unique prefix of a long option, so `env --split=...` IS
+    `--split-string` and `env --ch=sub` IS `--chdir`; exact matching let both through (a
+    cross-model review of PR #5). An ambiguous prefix returns itself, which matches nothing
+    and is then treated as moving the command, the fail-closed reading.
+    """
+    if not key.startswith("--") or len(key) < 3:
+        return key, False
+    known = {o for o in WRAPPER_VALUED.get(name, set()) | WRAPPER_RELOCATES.get(name, set())
+             if o.startswith("--")}
+    if key in known:
+        return key, False
+    hits = [o for o in known if o.startswith(key)]
+    if len(hits) == 1:
+        return hits[0], False
+    return key, len(hits) > 1
 
 # git's own options, before the subcommand. Those that take a separate value must be known, or
 # their value gets read as the subcommand.
@@ -293,9 +313,9 @@ def _strip_prefix_ex(argv):
                 if opt == "--":
                     i += 1
                     break
-                key = opt.split("=", 1)[0]
+                key, ambiguous = _long_option(name, opt.split("=", 1)[0])
                 short = opt[:2] if not opt.startswith("--") else key
-                if key in moves or short in moves:
+                if ambiguous or key in moves or short in moves:
                     redirects = True
                 if key in valued and "=" not in opt and i + 1 < len(argv):
                     i += 1  # the flag's value, e.g. `sudo -u daniel`
