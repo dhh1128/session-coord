@@ -6,6 +6,9 @@ another live session is ALSO sitting in. That is the 2026-09-17 near-miss -- `in
 held `infra:11`'s uncommitted audit and `infra:6` commits with `git add -A`; one more commit
 and it would have landed a stranger's work under its own message, silently.
 
+Since 2026-11-02 it lets one shape through even there: `git add`/`git commit` naming every file
+explicitly, none claimed by a peer in the tree. See `staging_form` and the DESIGN.md section.
+
 ## Why this tokenises instead of matching
 
 The first five versions of this file parsed shell with a regular expression, and review found a
@@ -411,6 +414,271 @@ def analyse(command, cwd):
     return True, tree if os.path.isabs(tree) else os.path.join(cwd, tree)
 
 
+# ----- explicit paths in a shared tree (2026-11-02) ---------------------------------------
+#
+# The gate used to refuse every staging command in a shared tree. In a docs repo whose owner's
+# rule is to commit straight to main from the main checkout, two sessions were registered, and
+# `git add products.md components.md && git commit -s -m ...` was refused although the peer's
+# only uncommitted change was a third file neither command named. The user ran the commit by
+# hand. The hazard this gate exists for is a BROAD pathspec sweeping a stranger's files; a list
+# of explicit files cannot sweep anything. So explicit, unclaimed paths now pass, and the rest
+# of this section is what "explicit" has to mean for that to stay true.
+#
+# Fail-closed throughout: anything this cannot read -- an option it does not know, a path it
+# cannot place in the tree, a board or an index it could not ask -- refuses as before.
+
+
+class Form:
+    """What a command would stage, if it is the explicit kind. `ok` False carries `reason`."""
+
+    def __init__(self, ok, reason="", paths=(), added=(), bare_commit=False):
+        self.ok, self.reason = ok, reason
+        self.paths, self.added, self.bare_commit = tuple(paths), tuple(added), bare_commit
+
+
+def _no(reason):
+    return Form(False, reason)
+
+
+GLOB_CHARS = set("*?[")
+
+# Options that change WHAT is staged rather than how, and so turn an explicit list into a
+# broad one. Named so the refusal can say why; anything not on an allow-list refuses anyway.
+_BROAD = {
+    "-A": "stages every change in the tree, including other sessions' files",
+    "--all": "stages every change in the tree, including other sessions' files",
+    "--no-ignore-removal": "stages every removal in the tree",
+    "-u": "stages every tracked change in the tree, including other sessions' files",
+    "--update": "stages every tracked change in the tree, including other sessions' files",
+    "-a": "commits every tracked change in the tree, including other sessions' files",
+    "-p": "is interactive, and picks hunks from files this cannot see",
+    "--patch": "is interactive, and picks hunks from files this cannot see",
+    "-i": "is interactive (add) or commits the whole index as well (commit)",
+    "--interactive": "is interactive, and picks hunks from files this cannot see",
+    "--include": "commits the whole index as well as the named paths",
+    "-e": "edits a patch of the whole diff",
+    "--edit": "edits a patch of the whole diff",
+    "--pathspec-from-file": "reads its paths from a file this cannot see",
+    "--amend": "rewrites the last commit, which in a shared tree may be another session's",
+}
+
+_ADD_FLAGS = {"-v", "--verbose", "-f", "--force", "-N", "--intent-to-add", "-n", "--dry-run"}
+_ADD_SHORT = set("vfNn")
+
+_COMMIT_FLAGS = {
+    "-s", "--signoff", "--no-signoff", "-q", "--quiet", "-v", "--verbose", "-n", "--no-verify",
+    "--verify", "--no-edit", "-o", "--only", "--allow-empty", "--allow-empty-message",
+    "--no-gpg-sign", "--gpg-sign", "--no-post-rewrite", "--status", "--no-status",
+}
+_COMMIT_VALUED = {
+    "-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message",
+    "--author", "--date", "--cleanup", "--trailer", "-t", "--template",
+}
+_COMMIT_SHORT = set("sqvno")
+_COMMIT_SHORT_VALUED = set("mFCct")
+
+
+def _place(path, gitcwd, root):
+    """`path` relative to `root`, or (None, why) when it is not one explicit file there."""
+    if not path or path == ".":
+        return None, f"`{path or '.'}` names the whole directory"
+    if path.startswith(":"):
+        return None, f"`{path}` is a magic pathspec, which can match files nobody named"
+    if GLOB_CHARS & set(path):
+        return None, f"`{path}` is a glob, which can match files nobody named"
+    if "$" in path or path.startswith("~"):
+        return None, f"`{path}` was not expanded, so this cannot tell which file it is"
+    full = os.path.normpath(os.path.join(gitcwd, path))
+    rel = os.path.relpath(full, root)
+    if rel == "." or rel.startswith(".." + os.sep) or rel == "..":
+        return None, f"`{path}` is not inside this working tree"
+    if os.path.isdir(full):
+        return None, f"`{path}` is a directory, which stages everything under it"
+    return rel.replace(os.sep, "/"), ""
+
+
+def _parse_add(args, gitcwd, root):
+    paths, dashdash = [], False
+    for tok in args:
+        if not dashdash and tok == "--":
+            dashdash = True
+            continue
+        if not dashdash and tok.startswith("-"):
+            key = tok.split("=", 1)[0]
+            if key in _BROAD:
+                return None, f"`git add {key}` {_BROAD[key]}"
+            if tok in _ADD_FLAGS:
+                continue
+            if tok.startswith("-") and not tok.startswith("--") and set(tok[1:]) <= _ADD_SHORT:
+                continue
+            if not tok.startswith("--"):
+                for ch in tok[1:]:
+                    if f"-{ch}" in _BROAD:
+                        return None, f"`git add -{ch}` {_BROAD['-' + ch]}"
+            return None, f"`git add {tok}` is an option this gate does not know"
+        rel, why = _place(tok, gitcwd, root)
+        if rel is None:
+            return None, why
+        paths.append(rel)
+    if not paths:
+        return None, "`git add` names no files"
+    return paths, ""
+
+
+def _parse_commit(args, gitcwd, root):
+    paths, dashdash, i = [], False, 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if not dashdash and tok == "--":
+            dashdash = True
+            continue
+        if dashdash or not tok.startswith("-") or tok == "-":
+            rel, why = _place(tok, gitcwd, root)
+            if rel is None:
+                return None, why
+            paths.append(rel)
+            continue
+        if tok.startswith("--"):
+            key = tok.split("=", 1)[0]
+            if key in _BROAD:
+                return None, f"`git commit {key}` {_BROAD[key]}"
+            if key in _COMMIT_FLAGS:
+                continue
+            if key in _COMMIT_VALUED:
+                if "=" not in tok:
+                    i += 1
+                continue
+            return None, f"`git commit {tok}` is an option this gate does not know"
+        # A short cluster: `-s`, `-sm msg`, `-mmsg`, `-SKEYID`.
+        cluster = tok[1:]
+        for j, ch in enumerate(cluster):
+            if ch in _COMMIT_SHORT:
+                continue
+            if ch in _COMMIT_SHORT_VALUED:
+                if j == len(cluster) - 1:
+                    i += 1  # the value is the next token
+                break       # otherwise the rest of the cluster is the value
+            if ch == "S":
+                break       # -S[<keyid>], attached or absent
+            if f"-{ch}" in _BROAD:
+                return None, f"`git commit -{ch}` {_BROAD['-' + ch]}"
+            return None, f"`git commit -{ch}` is an option this gate does not know"
+    return paths, ""
+
+
+def staging_form(command, cwd, root):
+    """Is `command` nothing but explicit `git add`/`git commit` into the tree at `root`?
+
+    Every git write in it must be one of those two with every path named. Paths come back
+    relative to `root`, the tree's top level, because that is how claims and the index name
+    them. A bare `git commit` -- no paths -- is accepted only after an explicit `git add` in
+    the same command, and only on the gate's word that nothing else is staged
+    (`bare_commit`), because on its own it commits whatever is in the index, a peer's
+    staging included.
+    """
+    try:
+        is_write, tree = analyse(command, cwd)
+        segments = _segments(command)
+    except Exception:
+        return _no("this command could not be read")
+    if not is_write:
+        return Form(True)
+    if tree is None:
+        return _no("this gate could not tell which working tree the command writes to -- a "
+                   "`cd`, a `bash -c`, a variable or a git redirect is in the way. Run the git "
+                   "command directly, from the session's own directory")
+    root = os.path.realpath(root)
+    paths, added, bare = [], [], False
+    for argv in segments:
+        argv, _ = _strip_prefix(argv)
+        if not argv or os.path.basename(argv[0]) != "git":
+            continue
+        gitcwd, i = os.path.realpath(cwd), 1
+        while i < len(argv) and argv[i].startswith("-"):
+            tok = argv[i]
+            if tok == "-C" and i + 1 < len(argv):
+                gitcwd = os.path.realpath(os.path.join(gitcwd, argv[i + 1]))
+                i += 2
+                continue
+            if tok.startswith("-C") and not tok.startswith("-C="):
+                gitcwd = os.path.realpath(os.path.join(gitcwd, tok[2:]))
+                i += 1
+                continue
+            key = tok.split("=", 1)[0]
+            i += 2 if (key in GIT_OPTS_WITH_VALUE and "=" not in tok) else 1
+        if i >= len(argv) or argv[i] not in WRITE_VERBS:
+            continue
+        verb, rest = argv[i], argv[i + 1:]
+        if verb == "add":
+            got, why = _parse_add(rest, gitcwd, root)
+            if got is None:
+                return _no(why)
+            added += got
+            paths += got
+        elif verb == "commit":
+            got, why = _parse_commit(rest, gitcwd, root)
+            if got is None:
+                return _no(why)
+            if got:
+                paths += got
+            else:
+                bare = True
+        else:
+            return _no(f"`git {verb}` changes files every session in this tree is using")
+    if bare and not added:
+        return _no("a bare `git commit` commits whatever is already staged, including anything "
+                   "another session staged. Name the files: `git commit -s -m '...' -- <file> "
+                   "<file>`")
+    seen = []
+    for p in paths:
+        if p not in seen:
+            seen.append(p)
+    return Form(True, paths=seen, added=added, bare_commit=bare)
+
+
+def staged_paths(root):
+    """Paths staged in `root`'s index, or None when the index could not be read."""
+    try:
+        out = subprocess.run(["git", "-C", root, "diff", "--cached", "--name-only", "-z"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return tuple(p for p in out.stdout.split("\0") if p)
+
+
+def ask(tree, cwd, paths=(), session=""):
+    """The board's findings for `tree`, or None when the board could not be asked.
+
+    --repo-of as well as --workdir. `git -C /other/repo add -A` issued from here writes to a
+    DIFFERENT repository's board, and asking this repo's board about it checked the wrong one
+    -- or exited clean because the answer was about a tree nobody here shares.
+    """
+    argv = [str(CLI), "check", "--json", "--workdir", tree, "--repo-of", tree]
+    for p in paths:
+        argv += ["--path", p]
+    if paths:
+        argv += ["--session", session or ""]
+    try:
+        out = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=15)
+        found = json.loads(out.stdout or "[]")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return found if isinstance(found, list) else None
+
+
+def _explicit_remedy():
+    try:
+        sys.path.insert(0, str(CLI.parents[1]))
+        from sessioncoord.detect import EXPLICIT_REMEDY
+        return EXPLICIT_REMEDY
+    except Exception:
+        return ("Name the files explicitly: `git add <file>` and `git commit -- <file>`; "
+                "broad forms stay refused.")
+
+
 def deny(reason):
     print(json.dumps({
         "hookSpecificOutput": {
@@ -446,18 +714,6 @@ def main():
     if not is_write:
         return 0
 
-    def ask(tree):
-        # --repo-of as well as --workdir. `git -C /other/repo add -A` issued from here writes to
-        # a DIFFERENT repository's board, and asking this repo's board about it checked the
-        # wrong one -- or exited clean because the answer was about a tree nobody here shares.
-        argv = [str(CLI), "check", "--json", "--workdir", tree, "--repo-of", tree]
-        try:
-            out = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=15)
-            found = json.loads(out.stdout or "[]")
-        except (OSError, subprocess.SubprocessError, ValueError):
-            return []
-        return found if isinstance(found, list) else []
-
     # ALWAYS scoped to a named tree -- never the unscoped repo-wide question.
     #
     # Asking repo-wide when the tree could not be named looked like the conservative move and
@@ -472,28 +728,76 @@ def main():
     # the right trade: a rare miss, against denying every compliant session on every ambiguous
     # command, which is how a gate gets switched off -- after which every write goes through.
     if workdir is not None:
-        findings = ask(workdir)
+        findings = ask(workdir, cwd) or []
     else:
-        findings = ask(cwd)
+        findings = ask(cwd, cwd) or []
         for cand in candidate_trees(command, cwd)[:4]:
-            findings = findings + ask(cand)
+            findings = findings + (ask(cand, cwd) or [])
 
     shared = [f for f in findings if isinstance(f, dict) and f.get("code") == "shared-tree"]
     if not shared:
         return 0
 
     f = shared[0]
+    root = (f.get("workdirs") or [workdir or cwd])[0]
+    try:
+        form = staging_form(command, cwd, root)
+    except Exception:
+        form = _no("this command could not be read")
+    if form.ok and form.paths:
+        why = _owned(form, workdir or cwd, cwd, root, payload.get("session_id") or "")
+        if not why:
+            return 0
+        return deny(_refusal(f, why))
+    return deny(_refusal(f, form.reason or "this command is not an explicit list of files"))
+
+
+def _owned(form, tree, cwd, root, session):
+    """"" when every named path is safe to stage; otherwise why not. Fail-closed."""
+    found = ask(tree, cwd, form.paths, session)
+    if found is None:
+        return "the board could not be asked whether another session claims these files"
+    claimed = [c for c in found if isinstance(c, dict) and c.get("code") == "claimed-path"]
+    if claimed:
+        lines = "; ".join(f"{c.get('detail', '')} by {', '.join(c.get('sessions') or [])}"
+                          for c in claimed)
+        return f"these paths are claimed by another session in this tree: {lines}"
+    if form.bare_commit:
+        staged = staged_paths(root)
+        if staged is None:
+            return ("the bare `git commit` would commit whatever is staged, and the index could "
+                    "not be read. Name the files: `git commit -s -m '...' -- <file> <file>`")
+        extra = sorted(set(staged) - set(form.added))
+        if extra:
+            return ("the bare `git commit` would also commit files this command did not add, "
+                    f"already staged in the index: {', '.join(extra)}. Name your files instead: "
+                    "`git commit -s -m '...' -- <file> <file>`, which commits only those")
+    return ""
+
+
+def _refusal(f, why):
     who = os.environ.get("SESSION_COORD_USER", "").strip() or "the user"
     others = ", ".join(str(s) for s in (f.get("sessions") or [])) or "another session"
-    return deny(
+    by_design = f.get("severity") != "block"
+    text = (
         f"This working tree is shared with {others}. {f.get('detail', '')}\n\n"
+        f"Refused because {why}.\n\n"
         "A command that stages, rewrites or cleans here can take their uncommitted files with "
-        "it -- that came within one commit of being real in a private infra repo on 2026-09-17, and "
-        "`git clean` would have destroyed the untracked half outright.\n\n"
-        f"Do this instead: {f.get('remedy', '')}\n\n"
-        "If you moved into a worktree with `cd` rather than with the EnterWorktree tool, this "
-        "is why: the gate is handed the SESSION's directory, and a shell `cd` does not change "
-        "it. EnterWorktree with your worktree path, then re-register, and this clears.\n\n"
+        "it -- that came within one commit of being real in a private infra repo on 2026-09-17, "
+        "and `git clean` would have destroyed the untracked half outright.\n\n"
+    )
+    if by_design:
+        text += f"What this gate accepts here: {f.get('remedy', '')}\n\n"
+    else:
+        text += (
+            f"To commit only your own files, the gate accepts this: {_explicit_remedy()}\n\n"
+            f"Otherwise: {f.get('remedy', '')}\n\n"
+            "If you moved into a worktree with `cd` rather than with the EnterWorktree tool, "
+            "this is why: the gate is handed the SESSION's directory, and a shell `cd` does not "
+            "change it. EnterWorktree with your worktree path, then re-register, and this "
+            "clears.\n\n"
+        )
+    return text + (
         "If you believe it is wrong for some other reason, tell the CONDUCTOR "
         f"(`session-coord conductor show`) rather than {who} -- it owns this tooling and can "
         "check your case against the live board. Report what you ran and what you observed; "
