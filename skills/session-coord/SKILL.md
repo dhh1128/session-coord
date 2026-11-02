@@ -53,7 +53,7 @@ When peers share a git repo, each session should work in its own worktree: `git 
 
 Where a repo shares its checkout on purpose (it carries a `.session-coord-shared-checkout` file, and the board calls the shared tree a warning), or where you only need to commit files you wrote: name every file. `git add a.md b.md && git commit -s -m '...'` and `git commit -s -m '...' -- a.md b.md` both pass a shared tree, as long as no peer in it has claimed those files and, for the first form, nothing else is staged. Claim your files when you start (`--claim`), because a claim is the only thing that tells the gate a file is yours rather than a peer's.
 
-If you need to commit into a different repository from the one the session started in, use `git -C /literal/path …` with a literal path. The gate checks only the tree a single `-C` names; with `cd X && git …`, or a path held in a shell variable, it cannot be sure where the write lands and checks your session's own tree as well.
+If you need to commit into a different repository from the one the session started in, use `git -C /literal/path …` or `cd /literal/path && git …` with a literal path. The gate checks only the tree those name. With `;` instead of `&&`, a path held in a shell variable, or `bash -c`, it cannot be sure where the write lands and checks your session's own tree as well.
 
 ## The conductor
 
