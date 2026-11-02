@@ -13,6 +13,7 @@ Pure. Everything comes in on the `Board`; nothing here shells out.
 
 from __future__ import annotations
 
+import fnmatch
 import posixpath
 from collections import defaultdict
 from typing import Iterable, Sequence
@@ -86,6 +87,9 @@ def detect_shared_tree(board: Board) -> list[Finding]:
         if not _is_git(board):
             out.append(_shared_folder(workdir, group))
             continue
+        if _shared_on_purpose(board):
+            out.append(_shared_checkout(workdir, group))
+            continue
         out.append(Finding(
             code="shared-tree",
             severity="block",
@@ -108,6 +112,116 @@ def detect_shared_tree(board: Board) -> list[Finding]:
 
 def _is_git(board: Board) -> bool:
     return board.facts is None or board.facts.is_git
+
+
+def _shared_on_purpose(board: Board) -> bool:
+    return board.facts is not None and board.facts.shared_checkout
+
+
+# What the gate will still let through in a shared tree. Kept in one place because the board's
+# remedy and the gate's refusal both have to say it, and they must not drift apart.
+EXPLICIT_REMEDY = (
+    "Name the files explicitly: `git add <file> <file>` and `git commit -- <file> <file>`. "
+    "A bare `git commit` after `git add` in the same command is fine when nothing else is "
+    "staged. Broad forms (`add -A`, `add .`, `add -u`, `commit -a`, directories, globs) stay "
+    "refused, and so is any file another session in this tree has claimed."
+)
+
+
+def _shared_checkout(workdir: str, group: Sequence[Presence]) -> Finding:
+    """A repo whose owner wants its sessions in one checkout.
+
+    2026-11-02: a docs repo whose rule is to commit straight to main from the main checkout,
+    no worktree and no branch. The block told its sessions to take a worktree -- contradicting
+    the repo -- and refused commits that named two files nobody else had touched. The owner
+    can now say so in a checked-in file, and the finding becomes a warning that says what is
+    still safe. The gate's refusal of broad pathspecs does not change: the hazard is the same.
+    """
+    from .gitio import SHARED_CHECKOUT_MARKER
+    return Finding(
+        code="shared-tree",
+        severity="warn",
+        summary=f"{len(group)} sessions share this checkout (by design)",
+        detail=(
+            f"{workdir} is open in {', '.join(_labels(group))}. This repo's "
+            f"{SHARED_CHECKOUT_MARKER} says sessions share its main checkout on purpose, so "
+            "stage only your own files and claim them first."
+        ),
+        sessions=_labels(group),
+        workdirs=(workdir,),
+        remedy=EXPLICIT_REMEDY,
+    )
+
+
+def _claim_relative(claim: str, workdir: str) -> str | None:
+    """A claim as a path relative to `workdir`, or None when it governs somewhere else.
+
+    Claims are usually repo-relative (`docs/**`), but sessions also claim absolute paths, and
+    an absolute claim outside this tree says nothing about it.
+    """
+    # Normalised lexically first: `/repo/../repo/docs/**` and `./docs/*.md` are ordinary
+    # spellings of claims, and the gate normalises the paths it asks about (Copilot on PR #5).
+    c = posixpath.normpath(claim.strip())
+    if not posixpath.isabs(c):
+        return c
+    root = posixpath.normpath(workdir)
+    if c.rstrip("/") == root or c.rstrip("/*") == root:
+        return "**"
+    if c.startswith(root + "/"):
+        return c[len(root) + 1:]
+    return None
+
+
+def _claim_covers(claim: str, path: str) -> bool:
+    """True when `claim` could govern `path`. Errs toward True; a false hit only refuses.
+
+    Prefix overlap alone ignored any glob before the last segment, so `*.md` and
+    `docs/*/secret.md` protected nothing (hostile pass on PR #5, finding 4). `fnmatch` lets
+    `*` cross `/`, which over-matches -- the safe direction for a check that authorises.
+    Compared casefolded, because on a case-insensitive filesystem `readme.md` IS `README.md`.
+    """
+    c, p = claim.strip().casefold(), path.strip().strip("/").casefold()
+    if _claims_overlap(c, p):
+        return True
+    if any(ch in c for ch in "*?["):
+        pat = c.strip("/")
+        return fnmatch.fnmatchcase(p, pat) or fnmatch.fnmatchcase(p, pat + "/*")
+    return False
+
+
+def claimed_paths(board: Board, workdir: str, session_id: str,
+                  paths: Iterable[str]) -> list[Finding]:
+    """A finding for each named path that another session in `workdir` has claimed.
+
+    What lets the gate pass an explicit `git add` in a shared tree: the files must be ones no
+    peer has said it is editing. Only peers in the SAME tree count -- one in its own worktree
+    stages into its own index, and claim-overlap already reports the conflict in intent.
+
+    An empty `session_id` means the caller could not say who it is. Then every claim counts,
+    its own included, because excusing a claim needs knowing whose it is.
+    """
+    here = workdir.rstrip("/")
+    peers = [s for s in board.sessions
+             if s.workdir.rstrip("/") == here and (not session_id or s.session_id != session_id)]
+    out = []
+    for path in paths:
+        for s in peers:
+            hit = next((c for c in s.claims
+                        if (rel := _claim_relative(c, here)) is not None
+                        and _claim_covers(rel, path)), None)
+            if hit is None:
+                continue
+            out.append(Finding(
+                code="claimed-path",
+                severity="block",
+                summary=f"{path} is claimed by {s.label}",
+                detail=f"{path} (claim: {hit})",
+                sessions=(s.label,),
+                workdirs=(here,),
+                remedy=f"Leave {path} to {s.label}, or agree a hand-off with it first.",
+            ))
+            break
+    return out
 
 
 def _shared_folder(workdir: str, group: Sequence[Presence]) -> Finding:
@@ -180,7 +294,7 @@ def detect_unworktreed(board: Board) -> list[Finding]:
     Alone, this is harmless and says nothing -- the rule exists to prevent collisions, not for
     its own sake. With company it is the shared-tree hazard waiting for the next arrival.
     """
-    if len(board.sessions) < 2 or not _is_git(board):
+    if len(board.sessions) < 2 or not _is_git(board) or _shared_on_purpose(board):
         return []
     exposed = [s for s in board.sessions if s.in_main_checkout]
     if not exposed:

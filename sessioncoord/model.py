@@ -164,6 +164,9 @@ class RepoFacts:
     #: False for a plain folder used as a workspace. The git-shaped hazards -- `git add -A`,
     #: branch switches, worktrees -- do not exist there, and remedies naming them are noise.
     is_git: bool = True
+    #: The repo's owner has declared, in a file on the remote's default branch, that sessions
+    #: share the main checkout on purpose. See `gitio.SHARED_CHECKOUT_MARKER`.
+    shared_checkout: bool = False
 
     @property
     def default_branch_in_sync(self) -> bool:

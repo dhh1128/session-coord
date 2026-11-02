@@ -51,7 +51,9 @@ session-coord register --name "tam-sizing" \
 
 When peers share a git repo, each session should work in its own worktree: `git worktree add <repo>/.worktrees/<topic> -b <topic> origin/main`, then move the *session* there. In Claude Code use the **`EnterWorktree`** tool, not a shell `cd`. In Codex, start the session in the worktree and register there. The gate is handed the session's directory, so a shell `cd` leaves you looking, to the gate, like a session still sitting in the shared checkout — refused, and shown a remedy you think you have already followed.
 
-If you need to commit into a different repository from the one the session started in, use `git -C /literal/path …` with a literal path. The gate checks only the tree a single `-C` names; with `cd X && git …`, or a path held in a shell variable, it cannot be sure where the write lands and checks your session's own tree as well.
+Where a repo shares its checkout on purpose (it carries a `.session-coord-shared-checkout` file, and the board calls the shared tree a warning), or where you only need to commit files you wrote: name every file. `git add a.md b.md && git commit -s -m '...'` and `git commit -s -m '...' -- a.md b.md` both pass a shared tree, as long as no peer in it has claimed those files and, for the first form, nothing else is staged. Claim your files when you start (`--claim`), because a claim is the only thing that tells the gate a file is yours rather than a peer's.
+
+If you need to commit into a different repository from the one the session started in, use `git -C /literal/path …` or `cd /literal/path && git …` with a literal path. The gate checks only the tree those name. With `;` instead of `&&`, a path held in a shell variable, or `bash -c`, it cannot be sure where the write lands and checks your session's own tree as well.
 
 ## The conductor
 

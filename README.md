@@ -45,7 +45,7 @@ When a second session starts in the same project, it is told about the sessions 
 - `session-coord check` reports problems: overlapping claims, sessions sharing a working tree, and no conductor.
 - `session-coord msg <name> "<text>"` leaves a message for another session. It is delivered into that session's context at the start of its next turn.
 - `session-coord ask add` / `ask list` keep the one queue of things you need to answer, in dependency order, each written to stand on its own.
-- In a git repo, a hook refuses `git add`/`commit`/etc. in a working tree another live session is also using, because one session's `git add -A` would sweep up the other's uncommitted work.
+- In a git repo, a hook refuses `git add`/`commit`/etc. in a working tree another live session is also using, because one session's `git add -A` would sweep up the other's uncommitted work. It lets through a `git add` or `git commit` that names every file explicitly, provided no other session in that tree has claimed one of them. A bare `git commit` passes only right after an explicit `git add` in the same command, and only when nothing else is staged. Broad forms (`add -A`, `add .`, `add -u`, `commit -a`, directories, globs, magic pathspecs, `--pathspec-from-file`) are always refused, and the refusal says what it would accept instead.
 
 ### What counts as "the same project"
 
@@ -74,6 +74,8 @@ Both settings are optional.
 ```
 
 This is the intended way to customize it. Fork the repository only to change the mechanics.
+
+**A repo that shares its checkout on purpose.** Some repos are meant to be worked in from the main checkout, with no worktree and no branch: a docs repo that commits straight to main, for example. To say so, commit a file named `.session-coord-shared-checkout` at the repo root and push it to the remote's default branch. Its contents are for humans, so write down why. The board then reports a shared tree there as a warning rather than a block, and it stops telling sessions to take a worktree. The hook still refuses broad pathspecs and claimed files there, since those are what actually sweep up another session's work. The file counts only once it is on `origin/<default branch>`. A copy that is only in the working tree, or only committed locally, is ignored, so a session cannot quietly opt itself out.
 
 ## Where it keeps things
 
