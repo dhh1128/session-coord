@@ -70,6 +70,8 @@ def _children() -> dict[int, list[int]] | None:
     the PR #3 blocker arriving through the process-tree door instead of the tmux one -- found
     by the second review round, after the first fix closed only the tmux path.
     """
+    if not procio._PROC:
+        return _children_from_ps()
     kids: dict[int, list[int]] = {}
     try:
         entries = os.listdir("/proc")
@@ -102,6 +104,47 @@ def _children() -> dict[int, list[int]] | None:
     return kids
 
 
+def _children_from_ps() -> dict[int, list[int]] | None:
+    """The process tree from one `ps` listing, for a box with no `/proc` (every Mac).
+
+    Same contract as the `/proc` walk: None when we could not look, never a partial tree. A
+    failed `ps`, or a line that is not two integers, means the answer is not the shape we asked
+    for, and a half-read tree would let `sweep` delete a live record. BSD `ps -A` lists every
+    user's processes, so there is no hidepid-style partial view to worry about here.
+    """
+    out = _run(["ps", "-A", "-o", "pid=,ppid="])
+    if not out:
+        return None
+    kids: dict[int, list[int]] = {}
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            return None
+        try:
+            pid, ppid = int(fields[0]), int(fields[1])
+        except ValueError:
+            return None
+        kids.setdefault(ppid, []).append(pid)
+    return kids
+
+
+def _signal_probe(pid: int) -> "bool | None":
+    """True if `pid` exists, False if it is gone, None if the probe itself failed.
+
+    Signal 0 checks existence without delivering anything. EPERM means the process is there and
+    belongs to someone else, which is "there".
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
 class Unknown(Exception):
     """We were refused sight of a process. Distinct from having looked and found nothing."""
 
@@ -121,6 +164,8 @@ def _is_claude(pid: int) -> bool:
     that session's record. ENOENT is the benign case -- the process exited mid-walk, which
     happens constantly -- and everything else means we were refused.
     """
+    if not procio._PROC:
+        return _is_claude_from_ps(pid)
     try:
         with open(f"/proc/{pid}/comm") as f:
             if f.read().strip() == "claude":
@@ -131,6 +176,28 @@ def _is_claude(pid: int) -> bool:
         return False
     except OSError as e:
         raise Unknown(str(e)) from e
+    return bool(argv) and os.path.basename(argv[0]) == "claude"
+
+
+def _is_claude_from_ps(pid: int) -> bool:
+    """`_is_claude` for a box with no `/proc`, with the same three answers.
+
+    `ps` exits non-zero both for a pid that is gone and for one it could not describe, so its
+    silence is disambiguated with a signal probe: gone is False, anything still there that `ps`
+    would not name is Unknown.
+    """
+    comm = procio._ps(pid, "comm")
+    if comm is None:
+        if _signal_probe(pid) is False:
+            return False
+        raise Unknown(f"ps could not describe live pid {pid}")
+    if os.path.basename(comm) == "claude":
+        return True
+    argv = procio.argv_of(pid)
+    if argv is None:
+        if _signal_probe(pid) is False:
+            return False
+        raise Unknown(f"ps could not read the argv of live pid {pid}")
     return bool(argv) and os.path.basename(argv[0]) == "claude"
 
 
@@ -156,7 +223,9 @@ def _argv_of(pid: int) -> list[str] | None:
 
 
 def _pid_exited(pid: int) -> bool:
-    """True only when /proc confirms a vanished process, not when access was refused."""
+    """True only when the OS confirms a vanished process, not when access was refused."""
+    if not procio._PROC:
+        return _signal_probe(pid) is False
     try:
         os.stat(f"/proc/{pid}")
     except FileNotFoundError:

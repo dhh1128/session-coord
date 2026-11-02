@@ -20,7 +20,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-from sessioncoord import store, tmuxio
+from sessioncoord import procio, store, tmuxio
 from sessioncoord.liveness import is_live
 from sessioncoord.model import Presence
 
@@ -100,6 +100,12 @@ class TestTheEffectiveTree:
 
 
 class TestAnUnreadableProcessIsUnknown:
+    @pytest.fixture(autouse=True)
+    def _proc_path(self, monkeypatch):
+        # These pin the /proc walk, so they run it even on a box without /proc; the ps path
+        # has its own tests in test_tmuxio_without_proc.py.
+        monkeypatch.setattr(procio, "_PROC", True)
+
     def test_a_denied_comm_read_raises_rather_than_reporting_absent(self, monkeypatch):
         # Fifth door onto the same property: collapsing OSError to False reported a LIVE claude
         # as absent, and the sweeper deleted its record.
