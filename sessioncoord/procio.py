@@ -108,7 +108,12 @@ def is_claude(argv: list[str] | None) -> bool:
         return True
     if os.path.basename(argv[0]) in ("node", "bun") and len(argv) > 1:
         first = argv[1]
-        return os.path.basename(first) == "claude" or "claude-code" in first
+        # The package directory, not the substring "claude-code": that also matched any script
+        # under a directory like claude-code-dashboard/, which then read as a live session.
+        return (os.path.basename(first) == "claude"
+                # The leading "/" lets a relative `@anthropic-ai/claude-code/cli.js`, run from
+                # inside node_modules, match the same way an absolute path does.
+                or "/@anthropic-ai/claude-code/" in "/" + first.replace("\\", "/"))
     return False
 
 

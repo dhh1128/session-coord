@@ -21,7 +21,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-from sessioncoord import detect, store, tmuxio
+from sessioncoord import detect, procio, store, tmuxio
 from sessioncoord.model import Board, Presence
 
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "session-coord-gate-check"
@@ -88,6 +88,12 @@ class TestARootGlobClaimsEverything:
 
 
 class TestAnUnreadableProcessIsUnknownNotAbsent:
+    @pytest.fixture(autouse=True)
+    def _proc_path(self, monkeypatch):
+        # These pin the /proc walk, so they run it even on a box without /proc; the ps path
+        # has its own tests in test_tmuxio_without_proc.py.
+        monkeypatch.setattr(procio, "_PROC", True)
+
     def test_permission_denied_makes_the_whole_tree_unknown(self, monkeypatch):
         # hidepid=2, a container boundary, another user's process. We were refused sight of it,
         # which is not the same as it not being there.

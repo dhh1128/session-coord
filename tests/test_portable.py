@@ -77,6 +77,14 @@ class TestProcio:
         (["node", "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"], True),
         (["node", "/usr/local/bin/claude"], True),
         (["node", "server.js"], False),
+        # Hostile fix pass on PR #6: a substring match took these for Claude, so send() typed
+        # into a dashboard's pane and a wrapper above a real Claude hid it from the walk.
+        (["node", "/work/claude-code-dashboard/server.js"], False),
+        (["bun", "/work/my-claude-code-tools/index.ts"], False),
+        (["node", "/Users/x/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.mjs"], True),
+        # Launched from inside node_modules with a relative script path (hostile fix pass p3.1).
+        (["node", "@anthropic-ai/claude-code/cli.js"], True),
+        (["node", "node_modules/@anthropic-ai/claude-code/cli.js"], True),
         (["bash"], False),
         ([], False),
     ])
