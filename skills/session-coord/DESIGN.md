@@ -70,6 +70,8 @@ This reverses the earlier exclusion of `;`. The argument for excluding it was th
 
 Everything less certain falls back to the session's directory plus every directory the command names, which is today's behaviour: `$VAR`, a backtick, `$(…)`, a subshell, `||`, a pipe, a line continuation inside the `cd`, a `cd` that is not the first command, and an option or a `+N` stack argument. Two alternatives were rejected. Asking both the `cd` target and the session's directory would have kept the refusal in exactly the case that prompted this. Tracking every `cd` through the whole script would follow `cd` inside `if` blocks and functions, which this parser does not model, and a gate that guesses at control flow fails open.
 
+The hostile pass on PR #7 found three ways the resolver followed a `cd` that bash would not, all reproduced: a `popd` back into the session's tree, a quoted `~` that bash leaves literal, and a carriage return that shlex reads as whitespace and bash keeps in the name. A `popd` is now unreadable like a later `cd`. When a `cd` was followed and the rest is unreadable, the session's own tree is asked as well as the target. A `~` is expanded only when nothing in the word is quoted, and a `cd` line with a control character is not followed.
+
 Not verified: the check that a `cd` cannot fail was not tested against a directory removed between the hook running and the command running, which is a race of milliseconds. The hook was probed against the real board on 2026-11-03 in both directions (a commit into claude-zamu passes, the same command aimed at devenv is refused), by piping a payload to it rather than through a real Bash tool call.
 
 ## Messaging

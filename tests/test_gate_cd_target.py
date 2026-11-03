@@ -136,3 +136,35 @@ class TestStillRefused:
         _, other = trees
         monkeypatch.setattr(gate.os, "access", lambda p, m: False)
         assert gate._literal_cd(f"cd {other} && git add -A", "/") is None
+
+
+class TestHostilePassOnPR7:
+    """codex's full pass on PR #7. Each was reproduced in bash and through the hook."""
+
+    def test_popd_back_into_the_shared_tree(self, trees, monkeypatch, capsys):
+        shared, other = trees
+        for command in (f"pushd {other}; popd; git add -A",
+                        f"pushd {other} && popd && git add -A"):
+            denied, asked = run(monkeypatch, capsys, command, shared, shared)
+            assert denied, command
+            assert shared in asked
+
+    def test_an_unreadable_rest_after_a_cd_also_asks_the_session_tree(
+            self, trees, monkeypatch, capsys):
+        shared, other = trees
+        denied, _ = run(monkeypatch, capsys, f'cd {other} && cd "$W" && git add -A',
+                        shared, shared)
+        assert denied
+
+    @pytest.mark.parametrize("quoted", ["'~'", '"~"', "\\~", "'~/x'", '~"/x"'])
+    def test_a_quoted_tilde_is_not_expanded(self, quoted):
+        assert gate._literal_cd(f"cd {quoted}; git add -A", "/") is None
+
+    def test_an_unquoted_tilde_is(self):
+        import os
+        assert gate._literal_cd("cd ~; git add -A", "/")[0] == os.path.expanduser("~")
+
+    @pytest.mark.parametrize("ch", ["\r", "\v", "\f", "\x00"])
+    def test_a_control_character_in_the_cd_line(self, trees, ch):
+        _, other = trees
+        assert gate._literal_cd(f"cd {other}{ch}; git add -A", "/") is None

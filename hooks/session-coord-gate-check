@@ -530,7 +530,7 @@ def analyse(command, cwd):
                     if inner_write:
                         write, uncertain = True, True
             continue
-        if name in ("cd", "pushd"):
+        if name in ("cd", "pushd", "popd"):
             uncertain = True  # what follows runs somewhere this cannot name
             continue
         is_write, explicit, redirected = _git_write(argv)
@@ -927,6 +927,7 @@ def main():
     # the SESSION's tree, and a commit into an unrelated repo was refused with another repo's
     # shared-tree finding and told to take a worktree there (2026-11-02, reported by the
     # session that hit it).
+    session_cwd = cwd
     try:
         hop = _literal_cd(command, cwd)
         while hop is not None:
@@ -959,6 +960,11 @@ def main():
         findings = ask(workdir, cwd) or []
     else:
         findings = ask(cwd, cwd) or []
+        if cwd != session_cwd:
+            # A `cd` was followed, but the rest could not be read -- a `popd`, a later `cd`, a
+            # variable. It may run back in the session's own tree, so that is asked too
+            # (hostile pass on PR #7, finding 1).
+            findings = findings + (ask(session_cwd, session_cwd) or [])
         for cand in candidate_trees(command, cwd)[:4]:
             findings = findings + (ask(cand, cwd) or [])
 
@@ -1044,6 +1050,10 @@ def _literal_cd(command, cwd):
     if sep is None:
         return None
     head, rest = command[:i], command[i + sep:]
+    if any(not c.isprintable() and c != "\t" for c in head):
+        # shlex reads `\r` and friends as whitespace; bash keeps them in the name, the `cd`
+        # fails, and after a `;` the rest runs in the session's tree (PR #7, finding 3).
+        return None
     try:
         argv = shlex.split(head)
     except ValueError:
@@ -1053,6 +1063,11 @@ def _literal_cd(command, cwd):
         return None
     target = argv[1]
     if target.startswith("~"):
+        # Only an unquoted leading `~` is expanded by bash; `cd '~'` names a directory called
+        # `~` (PR #7, finding 2).
+        raw = head.lstrip()[len(argv[0]):].strip()
+        if not raw.startswith("~") or any(c in raw for c in "'\"\\"):
+            return None  # any quoting in the word can stop bash expanding it: `~"/x"`
         target = os.path.expanduser(target)
     if any(c in target for c in "$`*?[{}~"):
         return None
