@@ -242,3 +242,32 @@ class TestFixReviewOnPR7:
         gate.main()
         assert capsys.readouterr().out, real_ask
         assert shared in real_ask
+
+
+class TestHostileFixPassOnPR7:
+    def test_a_dotdot_through_real_directories_is_followed(self, trees, monkeypatch, capsys):
+        shared, other = trees
+        wt = Path(other).parent
+        command = f"cd {wt}/../.worktrees/remote-oracle && git add -A"
+        denied, asked = run(monkeypatch, capsys, command, shared, shared)
+        assert denied is None, denied
+        assert asked == [other]
+
+    def test_a_symlink_then_dotdot_asks_the_logical_parent(
+            self, trees, monkeypatch, capsys, tmp_path):
+        shared, other = trees
+        # `devenv/link` points elsewhere; bash's `cd devenv/link/..` lands in devenv.
+        (Path(shared) / "link").symlink_to(other)
+        assert gate._literal_cd(f"cd {shared}/link/.. && git add -A", "/") is None
+        lone = str(tmp_path / "claude-zamu")
+        denied, asked = run(monkeypatch, capsys, f"cd {shared}/link/.. && git add -A",
+                            lone, shared)
+        assert denied
+        assert shared in asked
+
+    def test_a_quoted_semicolon_is_a_word(self, trees, monkeypatch, capsys):
+        shared, other = trees
+        for tail in ("printf ';'", 'echo "a || b"', "echo '&'"):
+            denied, _ = run(monkeypatch, capsys,
+                            f"cd {other} && git add -A && {tail}", shared, shared)
+            assert denied is None, (tail, denied)
