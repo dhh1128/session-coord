@@ -470,15 +470,18 @@ def candidate_trees(command, cwd):
     # component, symlink or not) and as the kernel does. The board resolves physically, so
     # without the logical spelling `cd link/..` asked the wrong parent (hostile fix pass on
     # PR #7, finding 1).
-    named = []
+    named, here = {}, os.path.abspath(cwd)
     for p in out:
         if not p or "$" in p:
             continue
-        for q in (os.path.normpath(os.path.join(cwd, p)),
-                  os.path.realpath(os.path.join(cwd, p))):
-            if q != os.path.abspath(cwd) and q not in named:
-                named.append(q)
-    return named
+        # Bash's `cd` takes the logical reading when it exists and falls back to the physical
+        # one when it does not, so the physical spelling is asked only then (PR #8).
+        logical = os.path.normpath(os.path.join(cwd, p))
+        physical = os.path.realpath(os.path.join(cwd, p))
+        for q in ((logical,) if os.path.isdir(logical) else (logical, physical)):
+            if q != here:
+                named.setdefault(q, None)  # ordered and O(1); a list was quadratic (PR #8)
+    return list(named)
 
 
 def analyse(command, cwd):
@@ -1122,6 +1125,31 @@ def _literal_cd(command, cwd):
     return target, rest, joined_by_and and _runs_only_after(rest)
 
 
+def _neutralise_escapes(line):
+    r"""`line` with each backslash escape outside single quotes replaced by a plain letter.
+
+    Non-posix shlex keeps quotes but does not know backslash, so `printf a\;b` lexed as an
+    operator and falsely refused (hostile pass on PR #8). Inside single quotes a backslash is
+    literal and is left alone; a `\'` there then leaves the quote open, the lexer raises, and
+    the caller answers False.
+    """
+    out, quote, i = [], None, 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif ch == "\\" and i + 1 < len(line):
+            out.append("_")
+            i += 2
+            continue
+        elif ch in "\"'":
+            quote = None if quote == ch else (quote or ch)
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _runs_only_after(rest):
     """True when all of `rest` runs only if the `cd` before its `&&` succeeded.
 
@@ -1135,8 +1163,12 @@ def _runs_only_after(rest):
         return False
     # posix=False keeps quotes on the token, so a quoted `';'` is a word, not a separator
     # (hostile fix pass on PR #7, finding 3).
-    lexer = shlex.shlex(lines[0], posix=False, punctuation_chars=True)
+    # No commenters: in non-posix mode an escaped `\#` still opens a comment to shlex and
+    # hides the `;` after it (hostile pass on PR #8). Reading a real comment's text as
+    # commands can only make this answer False, which is the safe direction.
+    lexer = shlex.shlex(_neutralise_escapes(lines[0]), posix=False, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""
     try:
         tokens = list(lexer)
     except ValueError:

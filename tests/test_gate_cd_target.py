@@ -271,3 +271,33 @@ class TestHostileFixPassOnPR7:
             denied, _ = run(monkeypatch, capsys,
                             f"cd {other} && git add -A && {tail}", shared, shared)
             assert denied is None, (tail, denied)
+
+
+class TestHostilePassOnPR8:
+    @pytest.mark.parametrize("rest", ["echo \\#; git add -A", "echo a # x; git add -A"])
+    def test_a_hash_does_not_hide_a_separator(self, rest):
+        assert gate._runs_only_after(" " + rest) is False
+
+    def test_many_named_paths_stay_linear(self):
+        import time
+        command = "git " + " ".join(f"-C /p{i}" for i in range(20000)) + " add -A"
+        t = time.monotonic()
+        gate.candidate_trees(command, "/")
+        assert time.monotonic() - t < 2
+
+    @pytest.mark.parametrize("rest,sure", [
+        (r"printf a\;b && git add -A", True),
+        (r'echo "a\"; b" && git add -A', True),
+        (r"echo 'a\'; git add -A", False),
+        (r"echo a\\; git add -A", False),
+    ])
+    def test_backslash_escapes(self, rest, sure):
+        assert gate._runs_only_after(" " + rest) is sure
+
+    def test_a_symlinks_physical_parent_is_asked_only_when_the_logical_one_is_missing(
+            self, tmp_path):
+        real = tmp_path / "real" / "bin"
+        real.mkdir(parents=True)
+        (tmp_path / "bin").symlink_to(real)
+        got = gate.candidate_trees(f"cd {tmp_path}/bin/.. && git add -A", "/")
+        assert got == [str(tmp_path)]
