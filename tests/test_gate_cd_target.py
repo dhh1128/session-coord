@@ -294,10 +294,16 @@ class TestHostilePassOnPR8:
     def test_backslash_escapes(self, rest, sure):
         assert gate._runs_only_after(" " + rest) is sure
 
-    def test_a_symlinks_physical_parent_is_asked_only_when_the_logical_one_is_missing(
-            self, tmp_path):
+    def test_a_symlinks_physical_parent_is_asked_as_well(self, tmp_path):
+        # Copilot on PR #8: `set -o physical` makes bash's cd physical, so both are asked.
         real = tmp_path / "real" / "bin"
         real.mkdir(parents=True)
         (tmp_path / "bin").symlink_to(real)
         got = gate.candidate_trees(f"cd {tmp_path}/bin/.. && git add -A", "/")
-        assert got == [str(tmp_path)]
+        assert got == [str(tmp_path), str(tmp_path / "real")]
+
+    def test_too_many_candidates_refuses(self, trees, monkeypatch, capsys):
+        shared, _ = trees
+        command = "cd $X && git " + " ".join(f"-C /p{i}" for i in range(9)) + " add -A"
+        denied, _ = run(monkeypatch, capsys, command, shared, "/nobody")
+        assert denied and "more than the 8" in denied

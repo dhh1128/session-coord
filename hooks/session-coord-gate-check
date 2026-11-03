@@ -437,6 +437,9 @@ def _git_write(argv):
     return False, None, redirected
 
 
+MAX_CANDIDATES = 8
+
+
 def candidate_trees(command, cwd):
     """Every directory this command mentions that could be the tree it writes to.
 
@@ -474,11 +477,11 @@ def candidate_trees(command, cwd):
     for p in out:
         if not p or "$" in p:
             continue
-        # Bash's `cd` takes the logical reading when it exists and falls back to the physical
-        # one when it does not, so the physical spelling is asked only then (PR #8).
-        logical = os.path.normpath(os.path.join(cwd, p))
-        physical = os.path.realpath(os.path.join(cwd, p))
-        for q in ((logical,) if os.path.isdir(logical) else (logical, physical)):
+        # Both, always. Bash's `cd` is logical by default, but `set -o physical` in a profile
+        # makes it physical, and this cannot see the shell's options (Copilot on PR #8,
+        # reversing the hostile pass's ask to drop the physical one).
+        for q in (os.path.normpath(os.path.join(cwd, p)),
+                  os.path.realpath(os.path.join(cwd, p))):
             if q != here:
                 named.setdefault(q, None)  # ordered and O(1); a list was quadratic (PR #8)
     return list(named)
@@ -985,7 +988,16 @@ def main():
         findings = ask(workdir, cwd) or []
     else:
         findings = ask(cwd, cwd) or []
-        for cand in candidate_trees(command, cwd)[:8]:
+        cands = candidate_trees(command, cwd)
+        if len(cands) > MAX_CANDIDATES:
+            # Asking about the first few and allowing the rest would let a shared tree ninth
+            # in line through (Copilot on PR #8). A command naming this many trees is not one
+            # this can vouch for.
+            return deny(f"This command names {len(cands)} directories that git could write to, "
+                        f"more than the {MAX_CANDIDATES} this gate will check one by one, and "
+                        "it could not tell which one the write lands in. Split it, or run the "
+                        "git command with a single literal `git -C /path`.")
+        for cand in cands:
             findings = findings + (ask(cand, cwd) or [])
     # Every directory the write may fall back into. A shared one refuses outright: the
     # explicit-path allowance reads paths against the tree the command names, which is not
