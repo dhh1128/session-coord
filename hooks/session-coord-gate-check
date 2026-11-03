@@ -459,7 +459,10 @@ def candidate_trees(command, cwd):
             continue
         if os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1:
             out.append(argv[1])
-        i = 0
+        # git's own `-C`s only: from the first `git` word on, so `xargs git -C /x` still
+        # counts and `printf -C x` does not (hostile pass on PR #8, after the candidate cap
+        # turned printf arguments into a refusal).
+        i = next((k for k, t in enumerate(argv) if os.path.basename(t) == "git"), len(argv))
         while i < len(argv):
             tok = argv[i]
             if tok.startswith("-C") and tok not in ("-C",) and not tok.startswith("-C="):

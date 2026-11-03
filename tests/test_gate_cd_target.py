@@ -307,3 +307,8 @@ class TestHostilePassOnPR8:
         command = "cd $X && git " + " ".join(f"-C /p{i}" for i in range(9)) + " add -A"
         denied, _ = run(monkeypatch, capsys, command, shared, "/nobody")
         assert denied and "more than the 8" in denied
+
+    def test_non_git_dash_C_arguments_are_not_candidates(self):
+        command = "bash -c 'git add -A'; printf '%s' " + " ".join(f"-C /p{i}" for i in range(9))
+        assert gate.candidate_trees(command, "/") == []
+        assert gate.candidate_trees("xargs git -C /x add -A", "/") == ["/x"]
