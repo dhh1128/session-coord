@@ -466,9 +466,19 @@ def candidate_trees(command, cwd):
             elif tok.startswith(("--work-tree=", "--git-dir=", "-C=")):
                 out.append(tok.split("=", 1)[1])
             i += 1
-    return [p for p in out
-            if p and "$" not in p
-            and os.path.abspath(os.path.join(cwd, p)) != os.path.abspath(cwd)]
+    # Each named directory twice over: as bash's logical `cd` reads it (`..` undoes the last
+    # component, symlink or not) and as the kernel does. The board resolves physically, so
+    # without the logical spelling `cd link/..` asked the wrong parent (hostile fix pass on
+    # PR #7, finding 1).
+    named = []
+    for p in out:
+        if not p or "$" in p:
+            continue
+        for q in (os.path.normpath(os.path.join(cwd, p)),
+                  os.path.realpath(os.path.join(cwd, p))):
+            if q != os.path.abspath(cwd) and q not in named:
+                named.append(q)
+    return named
 
 
 def analyse(command, cwd):
@@ -972,7 +982,7 @@ def main():
         findings = ask(workdir, cwd) or []
     else:
         findings = ask(cwd, cwd) or []
-        for cand in candidate_trees(command, cwd)[:4]:
+        for cand in candidate_trees(command, cwd)[:8]:
             findings = findings + (ask(cand, cwd) or [])
     # Every directory the write may fall back into. A shared one refuses outright: the
     # explicit-path allowance reads paths against the tree the command names, which is not
@@ -1093,13 +1103,19 @@ def _literal_cd(command, cwd):
     if (os.environ.get("CDPATH") and not os.path.isabs(target)
             and target not in (".", "..") and not target.startswith(("./", "../"))):
         return None  # bash would search CDPATH first; the join below might be the wrong dir
-    parts = [p for p in target.split("/") if p not in ("", ".")]
-    if ".." in parts[next((k for k, p in enumerate(parts) if p != ".."), len(parts)):]:
+    joined = os.path.join(cwd, target)
+    if ".." in target.split("/") and not os.path.isdir(joined):
         # `missing/../shared` normalises to a directory that exists, but bash fails the `cd`
-        # on the missing component (Copilot on PR #7). Only leading `..` is followed.
+        # on the missing component (Copilot on PR #7). The kernel walks every component of
+        # the unnormalised path, so this is the check bash's own makes.
         return None
-    target = os.path.normpath(os.path.join(cwd, target))
+    target = os.path.normpath(joined)
     if not os.path.isdir(target) or not os.access(target, os.X_OK):
+        return None
+    if os.path.realpath(joined) != os.path.realpath(target):
+        # A symlink before a `..`: bash's logical `cd` and the physical path disagree, and
+        # which one bash takes depends on what exists. Not followed; the fallback asks both
+        # (hostile fix pass on PR #7, finding 1).
         return None
     if not rest.strip():
         return None
@@ -1117,7 +1133,9 @@ def _runs_only_after(rest):
     lines = [ln for ln in _logical_lines(rest) if ln.strip()]
     if len(lines) != 1:
         return False
-    lexer = shlex.shlex(lines[0], posix=True, punctuation_chars=True)
+    # posix=False keeps quotes on the token, so a quoted `';'` is a word, not a separator
+    # (hostile fix pass on PR #7, finding 3).
+    lexer = shlex.shlex(lines[0], posix=False, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         tokens = list(lexer)
