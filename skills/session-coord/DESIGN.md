@@ -72,6 +72,8 @@ Everything less certain falls back to the session's directory plus every directo
 
 The hostile pass on PR #7 found three ways the resolver followed a `cd` that bash would not, all reproduced: a `popd` back into the session's tree, a quoted `~` that bash leaves literal, and a carriage return that shlex reads as whitespace and bash keeps in the name. A `popd` is now unreadable like a later `cd`. When a `cd` was followed and the rest is unreadable, the session's own tree is asked as well as the target. A `~` is expanded only when nothing in the word is quoted, and a `cd` line with a control character is not followed.
 
+A known gap that predates this change: a git write run for you by another command, such as `xargs git -C /shared add -A`, `printf 'add -A' | xargs git -C /shared` or `find /shared -execdir git add -A \;`, is not recognised as a write at all (confirmed on main at 4ffd7c2). A partial fix was tried on PR #8 and withdrawn after one hostile pass, which found that verbs arrive on stdin, `-execdir` runs in the search path, a runner can carry a `sh -c` string, and `find -name git` is a read that a loose match would refuse. Doing it properly means modelling each runner's grammar, which is its own change.
+
 Not verified: the first version of the hook was probed against the real board on 2026-11-03 in both directions (a commit into claude-zamu passed, the same command aimed at devenv was refused), by piping a payload to it rather than through a real Bash tool call. By the time the review fixes were in, devenv had no second session, so the final version's refusals are covered by the tests only; its pass on the incident command was probed live.
 
 ## Messaging

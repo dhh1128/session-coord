@@ -311,20 +311,6 @@ class TestHostilePassOnPR8:
     def test_non_git_dash_C_arguments_are_not_candidates(self):
         command = "bash -c 'git add -A'; printf '%s' " + " ".join(f"-C /p{i}" for i in range(9))
         assert gate.candidate_trees(command, "/") == []
-        assert gate.candidate_trees("xargs git -C /x add -A", "/") == ["/x"]
-
-    @pytest.mark.parametrize("command", [
-        "xargs git -C /shared add -A",
-        "xargs -0 git add -A",
-        "find . -name x -exec git add {} +",
-    ])
-    def test_a_runner_carrying_a_git_write_is_a_write(self, command):
-        assert gate.analyse(command, "/")[0] is True
-
-    def test_a_runner_reaches_the_shared_tree(self, monkeypatch, capsys):
-        denied, asked = run(monkeypatch, capsys, "xargs git -C /shared add -A", "/lone",
-                            "/shared")
-        assert denied and "/shared" in asked
 
     def test_a_printed_git_word_starts_no_scan(self):
         command = "bash -c 'git add -A'; printf '%s' git " + " ".join(
