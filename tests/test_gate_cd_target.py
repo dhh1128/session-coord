@@ -19,6 +19,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -212,3 +213,32 @@ class TestCopilotOnPR7:
     def test_a_rest_opening_on_an_operator_is_a_syntax_error(self, trees, sep, op):
         _, other = trees
         assert gate._literal_cd(f"cd {other}{sep}{op} git add -A", "/") is None
+
+
+class TestFixReviewOnPR7:
+    """glm's read of the fix diff: a `cd` the resolver declines must still have its target
+    asked, which `candidate_trees` does for any literal `cd` argument."""
+
+    @pytest.mark.parametrize("command", [
+        "cd {e}/../devenv && git add -A",
+        "cd {lone} && cd e/../devenv && git add -A",
+    ])
+    def test_a_declined_dotdot_cd_still_has_its_target_asked(
+            self, trees, monkeypatch, capsys, tmp_path, command):
+        shared, other = trees
+        (tmp_path / "e").mkdir()
+        lone = str(tmp_path)
+        real_ask = []
+
+        def fake_ask(tree, cwd_, paths=(), session=""):
+            resolved = os.path.normpath(os.path.join(cwd_, tree))
+            real_ask.append(resolved)
+            return [dict(SHARED, workdirs=[shared])] if resolved == shared else []
+
+        monkeypatch.setattr(gate, "ask", fake_ask)
+        payload = {"tool_input": {"command": command.format(e=tmp_path / "e", lone=lone)},
+                   "cwd": str(Path(other).parent), "session_id": "me-id"}
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+        gate.main()
+        assert capsys.readouterr().out, real_ask
+        assert shared in real_ask
