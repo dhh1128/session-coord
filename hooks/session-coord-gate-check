@@ -83,6 +83,10 @@ WRAPPERS = {
     "setsid": False, "timeout": True, "doas": True,
 }
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+# Commands that run another command they are handed as arguments, with option grammars this
+# does not model. A git write among their arguments is a write in a tree this cannot name
+# (hostile pass on PR #8: `xargs git -C /shared add -A` ran with no gate at all).
+RUNNERS = {"xargs", "find", "parallel", "watch", "flock", "chronic", "unbuffer"}
 
 # Which of each wrapper's options take a SEPARATE value. Treating every option of a wrapper as
 # valued -- the old rule -- made `env -i git add -A` and `sudo -E git add -A` read `git` as the
@@ -462,7 +466,15 @@ def candidate_trees(command, cwd):
         # git's own `-C`s only: from the first `git` word on, so `xargs git -C /x` still
         # counts and `printf -C x` does not (hostile pass on PR #8, after the candidate cap
         # turned printf arguments into a refusal).
-        i = next((k for k, t in enumerate(argv) if os.path.basename(t) == "git"), len(argv))
+        # A `git` word starts the scan only where git is the command or a runner's argument;
+        # `printf '%s' git -C x` prints it (hostile pass on PR #8).
+        head = os.path.basename(argv[0])
+        if head == "git":
+            i = 0
+        elif head in RUNNERS:
+            i = next((k for k, t in enumerate(argv) if os.path.basename(t) == "git"), len(argv))
+        else:
+            i = len(argv)
         while i < len(argv):
             tok = argv[i]
             if tok.startswith("-C") and tok not in ("-C",) and not tok.startswith("-C="):
@@ -542,6 +554,9 @@ def analyse(command, cwd):
             # A wrapper this cannot fully read left something other than git in front, with
             # git still in the command: assume a write in a tree nobody can name, rather than
             # missing it the way `env -i git add -A` was missed.
+            write, uncertain = True, True
+            continue
+        if name in RUNNERS and _mentions_git_write(argv[1:]):
             write, uncertain = True, True
             continue
         if name in SHELLS:
