@@ -261,7 +261,11 @@ def _logical_lines(command):
         buf.append(ch)
         i += 1
     if buf:
-        lines.append("".join(buf))
+        line = "".join(buf)
+        # A heredoc's terminator on the last line has no newline after it, so the loop above
+        # never matched it; it is the end of the body, not a command.
+        if heredoc is None or (line.lstrip("\t") if heredoc_tabs else line) != heredoc:
+            lines.append(line)
     return lines
 
 
@@ -530,7 +534,7 @@ def analyse(command, cwd):
                     if inner_write:
                         write, uncertain = True, True
             continue
-        if name in ("cd", "pushd"):
+        if name in ("cd", "pushd", "popd"):
             uncertain = True  # what follows runs somewhere this cannot name
             continue
         is_write, explicit, redirected = _git_write(argv)
@@ -921,18 +925,28 @@ def main():
     if not CLI.exists():
         return 0
 
-    # A literal `cd /path && git ...` writes into /path exactly as `git -C /path` would, so it
-    # is resolved the same way before anything else looks. Without this the gate asked about
+    # A leading literal `cd /path && git ...` (or `;`, a newline, `pushd`) writes into /path
+    # exactly as `git -C /path` would, so it is resolved the same way before anything else
+    # looks. See `_literal_cd` for what counts as literal. Without this the gate asked about
     # the SESSION's tree, and a commit into an unrelated repo was refused with another repo's
     # shared-tree finding and told to take a worktree there (2026-11-02, reported by the
     # session that hit it).
+    #
+    #
+    # `behind` is every directory a hop left: the session's own, and each earlier hop. The
+    # write can land back in one of them if a followed `cd` might not hold (`_literal_cd`'s
+    # third value) or if the rest cannot be read -- a `popd` returns through a `pushd` stack
+    # (Copilot on PR #7). In either case each of them is asked too.
+    behind, unsure = [], False
     try:
         hop = _literal_cd(command, cwd)
         while hop is not None:
-            cwd, command = hop
+            behind.append(cwd)
+            cwd, command, sure = hop
+            unsure = unsure or not sure
             hop = _literal_cd(command, cwd)
     except Exception:
-        pass
+        unsure = True
 
     try:
         is_write, workdir = analyse(command, cwd)
@@ -960,6 +974,15 @@ def main():
         findings = ask(cwd, cwd) or []
         for cand in candidate_trees(command, cwd)[:4]:
             findings = findings + (ask(cand, cwd) or [])
+    # Every directory the write may fall back into. A shared one refuses outright: the
+    # explicit-path allowance reads paths against the tree the command names, which is not
+    # the one they would be staged in if the `cd` did not hold.
+    for d in (dict.fromkeys(behind) if (unsure or workdir is None) else ()):
+        back = [f for f in (ask(d, d) or [])
+                if isinstance(f, dict) and f.get("code") == "shared-tree"]
+        if back:
+            return deny(_refusal(back[0], "a `cd` in this command may not hold, and the write "
+                                 "would then land in this shared tree", named=False))
 
     shared = [f for f in findings if isinstance(f, dict) and f.get("code") == "shared-tree"]
     if not shared:
@@ -1004,17 +1027,22 @@ def _owned(form, tree, cwd, root, session):
 
 
 def _literal_cd(command, cwd):
-    """(new_cwd, rest) for `cd <literal dir> && <rest>`, else None.
+    """(new_cwd, rest) for a leading `cd <literal dir>` or `pushd <literal dir>`, else None.
 
-    Only the forms where the shell's behaviour is certain: one logical line, a bare `cd` with
-    exactly one argument and no options, joined by `&&` so the rest runs only if the `cd`
-    worked, to a directory that exists, whose name needs no expansion. Anything else -- `;`,
-    `||`, `$VAR`, a backtick, a missing directory -- stays unresolved, and the gate falls back
-    to asking about every tree it can name.
+    The `cd` must be the first command, with exactly one argument, no options, and a name
+    that needs no expansion, to a directory that exists and can be entered. It may be followed
+    by `&&`, `;` or a newline. With `&&` the rest of that and-list runs only if the `cd`
+    worked; with `;` or a newline it runs either way -- but a `cd` to an existing, searchable,
+    literal directory does not fail, so in every accepted form the rest runs there. Lines
+    after the first run there too, because a `cd` persists for the rest of the script; that is
+    why a heredoc commit message on later lines no longer defeats this (2026-11-03).
+
+    Anything less certain -- `||`, a pipe, `$VAR`, a backtick, a subshell, a missing or
+    unsearchable directory, a relative name while CDPATH is set -- stays unresolved, and the
+    gate falls back to the session's own tree plus every tree the command names.
     """
-    if "\n" in command.strip():
-        return None
     quote, i, n = None, 0, len(command)
+    sep = None
     while i < n:
         ch = command[i]
         if quote:
@@ -1023,30 +1051,85 @@ def _literal_cd(command, cwd):
         elif ch in "\"'":
             quote = ch
         elif ch == "\\":
+            if i + 1 < n and command[i + 1] == "\n":
+                return None  # a line continuation: the `cd` line is not what it looks like
             i += 1
         elif command.startswith("&&", i):
+            sep = 2
             break
-        elif ch in ";|&()<>`$":
+        elif ch in ";\n":
+            sep = 1
+            break
+        elif ch in "|&()<>`$#{}":
             return None
         i += 1
-    else:
+    if sep is None:
         return None
-    head, rest = command[:i], command[i + 2:]
+    head, rest = command[:i], command[i + sep:]
+    joined_by_and = sep == 2
+    if rest.lstrip(" \t\n").startswith(("&", "|", ";")):
+        return None  # `cd /x\n&& git ...` is a syntax error: nothing runs (Copilot on PR #7)
+    if any(not c.isprintable() and c != "\t" for c in head):
+        # shlex reads `\r` and friends as whitespace; bash keeps them in the name, the `cd`
+        # fails, and after a `;` the rest runs in the session's tree (PR #7, finding 3).
+        return None
     try:
         argv = shlex.split(head)
     except ValueError:
         return None
-    if len(argv) != 2 or argv[0] != "cd" or argv[1].startswith("-"):
+    if (len(argv) != 2 or argv[0] not in ("cd", "pushd")
+            or argv[1].startswith(("-", "+"))):
         return None
     target = argv[1]
     if target.startswith("~"):
+        # Only an unquoted leading `~` is expanded by bash; `cd '~'` names a directory called
+        # `~` (PR #7, finding 2).
+        raw = head.lstrip()[len(argv[0]):].strip()
+        if not raw.startswith("~") or any(c in raw for c in "'\"\\"):
+            return None  # any quoting in the word can stop bash expanding it: `~"/x"`
         target = os.path.expanduser(target)
     if any(c in target for c in "$`*?[{}~"):
         return None
-    target = os.path.normpath(os.path.join(cwd, target))
-    if not os.path.isdir(target):
+    if (os.environ.get("CDPATH") and not os.path.isabs(target)
+            and target not in (".", "..") and not target.startswith(("./", "../"))):
+        return None  # bash would search CDPATH first; the join below might be the wrong dir
+    parts = [p for p in target.split("/") if p not in ("", ".")]
+    if ".." in parts[next((k for k, p in enumerate(parts) if p != ".."), len(parts)):]:
+        # `missing/../shared` normalises to a directory that exists, but bash fails the `cd`
+        # on the missing component (Copilot on PR #7). Only leading `..` is followed.
         return None
-    return target, rest
+    target = os.path.normpath(os.path.join(cwd, target))
+    if not os.path.isdir(target) or not os.access(target, os.X_OK):
+        return None
+    if not rest.strip():
+        return None
+    return target, rest, joined_by_and and _runs_only_after(rest)
+
+
+def _runs_only_after(rest):
+    """True when all of `rest` runs only if the `cd` before its `&&` succeeded.
+
+    That holds for one logical line whose only operators are `&&` and `|`. A `;`, `||`, `&`
+    or a later line runs whatever the `cd` did, in the directory it left -- and the existence
+    check is not atomic with the shell's `cd`, so "the directory exists" was never a promise
+    that it would hold (Copilot on PR #7, reversing the first version of this rule).
+    """
+    lines = [ln for ln in _logical_lines(rest) if ln.strip()]
+    if len(lines) != 1:
+        return False
+    lexer = shlex.shlex(lines[0], posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    for t in tokens:
+        if t in ("&&", "|"):
+            continue
+        if t in OPERATORS or (set(t) <= set("();<>|&") and (
+                t in ("||", "|&") or set(t) & set("();") or t.strip("&") == "")):
+            return False
+    return True
 
 
 def _refusal(f, why, named=True):
@@ -1076,10 +1159,11 @@ def _refusal(f, why, named=True):
         text += (
             f"To commit only your own files, the gate accepts this: {_explicit_remedy()}\n\n"
             f"Otherwise: {f.get('remedy', '')}\n\n"
-            "If you moved into a worktree with `cd` rather than with the EnterWorktree tool, "
-            "this is why: the gate is handed the SESSION's directory, and a shell `cd` does not "
-            "change it. EnterWorktree with your worktree path, then re-register, and this "
-            "clears.\n\n"
+            "The gate judged the tree this command writes to: a leading literal `cd /path` "
+            "(or `pushd`), a `git -C /path`, or else the session's own directory. If the "
+            "command was meant for another tree, name it in one of those forms -- a `cd` "
+            "later in the command, or one through a variable, is not followed. To move the "
+            "session itself into a worktree of its own repo, use the EnterWorktree tool.\n\n"
         )
     return text + (
         "If you believe it is wrong for some other reason, tell the CONDUCTOR "

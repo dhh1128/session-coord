@@ -333,7 +333,7 @@ class TestALiteralCdNamesTheTree:
         d = tmp_path / "brand"
         d.mkdir()
         assert gate._literal_cd(f"cd {d} && git add a.md", "/elsewhere") == (
-            str(d), " git add a.md")
+            str(d), " git add a.md", True)
 
     def test_a_quoted_path_with_spaces(self, tmp_path):
         d = tmp_path / "with space"
@@ -348,13 +348,16 @@ class TestALiteralCdNamesTheTree:
     @pytest.mark.parametrize("command", [
         "cd $D && git add a.md",
         "cd `pwd` && git add a.md",
-        "cd /tmp; git add a.md",
         "cd /tmp || git add a.md",
         "cd /does/not/exist && git add a.md",
         "cd && git add a.md",
         "cd -P /tmp && git add a.md",
         "echo 'cd /tmp && git add -A'",
-        "cd /tmp\ngit add a.md",
+        "cd /tmp \\\n&& git add a.md",
+        "cd /tmp | git add a.md",
+        "(cd /tmp && git add a.md)",
+        "pushd +1 && git add a.md",
+        "cd /tmp",
     ])
     def test_anything_less_certain_is_not_resolved(self, command):
         assert gate._literal_cd(command, "/x") is None, command
