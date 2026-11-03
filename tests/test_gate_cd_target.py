@@ -79,11 +79,13 @@ class TestACommitInAnotherRepoIsJudgedThere:
         assert asked == [other]
 
     @pytest.mark.parametrize("sep", ["; ", "\n"])
-    def test_a_semicolon_or_newline_after_the_cd(self, trees, monkeypatch, capsys, sep):
+    def test_a_semicolon_or_newline_passes_from_an_unshared_session(
+            self, trees, monkeypatch, capsys, sep):
         shared, other = trees
-        denied, asked = run(monkeypatch, capsys, f"cd {other}{sep}git add -A", shared, shared)
+        lone = str(Path(other).parent)  # a directory nobody shares
+        denied, asked = run(monkeypatch, capsys, f"cd {other}{sep}git add -A", lone, shared)
         assert denied is None, denied
-        assert asked == [other]
+        assert other in asked and lone in asked
 
     def test_pushd(self, trees, monkeypatch, capsys):
         shared, other = trees
@@ -168,3 +170,45 @@ class TestHostilePassOnPR7:
     def test_a_control_character_in_the_cd_line(self, trees, ch):
         _, other = trees
         assert gate._literal_cd(f"cd {other}{ch}; git add -A", "/") is None
+
+
+class TestCopilotOnPR7:
+    def test_a_semicolon_or_newline_from_the_shared_tree_is_refused(
+            self, trees, monkeypatch, capsys):
+        # The `cd` is checked before the shell runs it; if the target goes away in between,
+        # `;` and a newline still run the write here.
+        shared, other = trees
+        for sep in ("; ", "\n"):
+            denied, asked = run(monkeypatch, capsys, f"cd {other}{sep}git add -A", shared, shared)
+            assert denied, sep
+            assert "may not hold" in denied
+
+    @pytest.mark.parametrize("rest", ["a || git add -A", "a; git add -A", "a & git add -A",
+                                      "a\ngit add -A"])
+    def test_a_rest_that_runs_whatever_the_cd_did(self, trees, monkeypatch, capsys, rest):
+        shared, other = trees
+        denied, _ = run(monkeypatch, capsys, f"cd {other} && {rest}", shared, shared)
+        assert denied, rest
+
+    def test_popd_through_a_pushd_stack(self, trees, monkeypatch, capsys, tmp_path):
+        shared, other = trees
+        safe = tmp_path / "safe"
+        safe.mkdir()
+        # The write lands in `safe`; a peer there must be seen.
+        denied, asked = run(monkeypatch, capsys,
+                            f"pushd {safe} && pushd {other} && popd && git add -A",
+                            str(tmp_path), str(safe))
+        assert denied
+        assert str(safe) in asked
+
+    def test_a_missing_component_hidden_by_dotdot(self, trees):
+        shared, other = trees
+        parent = str(Path(other).parent)
+        assert gate._literal_cd("cd missing/../remote-oracle && git add -A", parent) is None
+        assert gate._literal_cd("cd ../remote-oracle && git add -A", other)[0] == other
+
+    @pytest.mark.parametrize("sep", ["\n", "; "])
+    @pytest.mark.parametrize("op", ["&&", "||", "|", "&", ";"])
+    def test_a_rest_opening_on_an_operator_is_a_syntax_error(self, trees, sep, op):
+        _, other = trees
+        assert gate._literal_cd(f"cd {other}{sep}{op} git add -A", "/") is None

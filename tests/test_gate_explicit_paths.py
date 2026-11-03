@@ -333,7 +333,7 @@ class TestALiteralCdNamesTheTree:
         d = tmp_path / "brand"
         d.mkdir()
         assert gate._literal_cd(f"cd {d} && git add a.md", "/elsewhere") == (
-            str(d), " git add a.md")
+            str(d), " git add a.md", True)
 
     def test_a_quoted_path_with_spaces(self, tmp_path):
         d = tmp_path / "with space"
