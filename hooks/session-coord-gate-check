@@ -437,6 +437,9 @@ def _git_write(argv):
     return False, None, redirected
 
 
+MAX_CANDIDATES = 8
+
+
 def candidate_trees(command, cwd):
     """Every directory this command mentions that could be the tree it writes to.
 
@@ -456,7 +459,13 @@ def candidate_trees(command, cwd):
             continue
         if os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1:
             out.append(argv[1])
-        i = 0
+        # git's own `-C`s only: from the first `git` word on, so `xargs git -C /x` still
+        # counts and `printf -C x` does not (hostile pass on PR #8, after the candidate cap
+        # turned printf arguments into a refusal).
+        # git's own options only: `printf '%s' git -C x` prints them (hostile pass on PR #8).
+        # Commands that run git for you -- xargs, find -exec -- are not read here at all; see
+        # DESIGN.md, "The gate follows a leading `cd`", for that gap.
+        i = 0 if os.path.basename(argv[0]) == "git" else len(argv)
         while i < len(argv):
             tok = argv[i]
             if tok.startswith("-C") and tok not in ("-C",) and not tok.startswith("-C="):
@@ -466,9 +475,22 @@ def candidate_trees(command, cwd):
             elif tok.startswith(("--work-tree=", "--git-dir=", "-C=")):
                 out.append(tok.split("=", 1)[1])
             i += 1
-    return [p for p in out
-            if p and "$" not in p
-            and os.path.abspath(os.path.join(cwd, p)) != os.path.abspath(cwd)]
+    # Each named directory twice over: as bash's logical `cd` reads it (`..` undoes the last
+    # component, symlink or not) and as the kernel does. The board resolves physically, so
+    # without the logical spelling `cd link/..` asked the wrong parent (hostile fix pass on
+    # PR #7, finding 1).
+    named, here = {}, os.path.abspath(cwd)
+    for p in out:
+        if not p or "$" in p:
+            continue
+        # Both, always. Bash's `cd` is logical by default, but `set -o physical` in a profile
+        # makes it physical, and this cannot see the shell's options (Copilot on PR #8,
+        # reversing the hostile pass's ask to drop the physical one).
+        for q in (os.path.normpath(os.path.join(cwd, p)),
+                  os.path.realpath(os.path.join(cwd, p))):
+            if q != here:
+                named.setdefault(q, None)  # ordered and O(1); a list was quadratic (PR #8)
+    return list(named)
 
 
 def analyse(command, cwd):
@@ -972,7 +994,16 @@ def main():
         findings = ask(workdir, cwd) or []
     else:
         findings = ask(cwd, cwd) or []
-        for cand in candidate_trees(command, cwd)[:4]:
+        cands = candidate_trees(command, cwd)
+        if len(cands) > MAX_CANDIDATES:
+            # Asking about the first few and allowing the rest would let a shared tree ninth
+            # in line through (Copilot on PR #8). A command naming this many trees is not one
+            # this can vouch for.
+            return deny(f"This command names {len(cands)} directories that git could write to, "
+                        f"more than the {MAX_CANDIDATES} this gate will check one by one, and "
+                        "it could not tell which one the write lands in. Split it, or run the "
+                        "git command with a single literal `git -C /path`.")
+        for cand in cands:
             findings = findings + (ask(cand, cwd) or [])
     # Every directory the write may fall back into. A shared one refuses outright: the
     # explicit-path allowance reads paths against the tree the command names, which is not
@@ -1093,17 +1124,48 @@ def _literal_cd(command, cwd):
     if (os.environ.get("CDPATH") and not os.path.isabs(target)
             and target not in (".", "..") and not target.startswith(("./", "../"))):
         return None  # bash would search CDPATH first; the join below might be the wrong dir
-    parts = [p for p in target.split("/") if p not in ("", ".")]
-    if ".." in parts[next((k for k, p in enumerate(parts) if p != ".."), len(parts)):]:
+    joined = os.path.join(cwd, target)
+    if ".." in target.split("/") and not os.path.isdir(joined):
         # `missing/../shared` normalises to a directory that exists, but bash fails the `cd`
-        # on the missing component (Copilot on PR #7). Only leading `..` is followed.
+        # on the missing component (Copilot on PR #7). The kernel walks every component of
+        # the unnormalised path, so this is the check bash's own makes.
         return None
-    target = os.path.normpath(os.path.join(cwd, target))
+    target = os.path.normpath(joined)
     if not os.path.isdir(target) or not os.access(target, os.X_OK):
+        return None
+    if os.path.realpath(joined) != os.path.realpath(target):
+        # A symlink before a `..`: bash's logical `cd` and the physical path disagree, and
+        # which one bash takes depends on what exists. Not followed; the fallback asks both
+        # (hostile fix pass on PR #7, finding 1).
         return None
     if not rest.strip():
         return None
     return target, rest, joined_by_and and _runs_only_after(rest)
+
+
+def _neutralise_escapes(line):
+    r"""`line` with each backslash escape outside single quotes replaced by a plain letter.
+
+    Non-posix shlex keeps quotes but does not know backslash, so `printf a\;b` lexed as an
+    operator and falsely refused (hostile pass on PR #8). Inside single quotes a backslash is
+    literal and is left alone; a `\'` there then leaves the quote open, the lexer raises, and
+    the caller answers False.
+    """
+    out, quote, i = [], None, 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif ch == "\\" and i + 1 < len(line):
+            out.append("_")
+            i += 2
+            continue
+        elif ch in "\"'":
+            quote = None if quote == ch else (quote or ch)
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _runs_only_after(rest):
@@ -1117,8 +1179,14 @@ def _runs_only_after(rest):
     lines = [ln for ln in _logical_lines(rest) if ln.strip()]
     if len(lines) != 1:
         return False
-    lexer = shlex.shlex(lines[0], posix=True, punctuation_chars=True)
+    # posix=False keeps quotes on the token, so a quoted `';'` is a word, not a separator
+    # (hostile fix pass on PR #7, finding 3).
+    # No commenters: in non-posix mode an escaped `\#` still opens a comment to shlex and
+    # hides the `;` after it (hostile pass on PR #8). Reading a real comment's text as
+    # commands can only make this answer False, which is the safe direction.
+    lexer = shlex.shlex(_neutralise_escapes(lines[0]), posix=False, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""
     try:
         tokens = list(lexer)
     except ValueError:
