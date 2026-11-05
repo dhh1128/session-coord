@@ -268,3 +268,46 @@ def test_names_that_only_casefold_alike_stay_distinct(estate, capsys):
     assert cli.main(["inbox", "--repo", OTHER]) == 0
     assert "private note" not in capsys.readouterr().out
     assert len(store.load_held()) == 1
+
+
+def test_a_dash_body_reads_stdin_like_zamu_tell(estate, monkeypatch):
+    # 2026-11-05: a session wrote `msg <peer> - < file`, `zamu tell`'s convention, and two
+    # messages went out whose whole body was "-". The peer received nothing it could use.
+    import io
+    hold_budget(estate)
+    estate.setattr(cli.tmuxio, "send", lambda *a, **kw: pytest.fail("budgeted send"))
+    monkeypatch.setattr("sys.stdin", _Stdin(b"the real body\nline two\n"))
+    assert cli.main(["msg", "--repo", SENDER, "keripy-tls-pin", "-"]) == 0
+    assert [m.body for m in store.load_held()] == ["the real body\nline two"]
+
+
+def test_a_dash_body_with_empty_stdin_is_refused(estate, monkeypatch, capsys):
+    import io
+    estate.setattr(cli.tmuxio, "send", lambda *a, **kw: pytest.fail("sent an empty body"))
+    monkeypatch.setattr("sys.stdin", _Stdin(b"  \n"))
+    assert cli.main(["msg", "--repo", SENDER, "keripy-tls-pin", "-"]) == 2
+    assert store.load_held() == []
+    assert "stdin" in capsys.readouterr().err
+
+
+class _Stdin:
+    def __init__(self, data: bytes = b"", exc: Exception | None = None):
+        import io
+        self.buffer = io.BytesIO(data)
+        if exc is not None:
+            def boom(*a, **k):
+                raise exc
+            self.buffer.read = boom
+
+
+@pytest.mark.parametrize("stdin", [
+    _Stdin(b"\xff\xfe not utf-8"),       # p1.3: a traceback, not a refusal
+    _Stdin(exc=OSError("read failed")),  # p1.3
+    _Stdin(b"x" * (cli.MSG_STDIN_LIMIT + 1)),  # p1.2: unbounded read
+])
+def test_a_dash_body_refuses_unreadable_or_oversized_stdin(estate, monkeypatch, capsys, stdin):
+    estate.setattr(cli.tmuxio, "send", lambda *a, **kw: pytest.fail("sent"))
+    monkeypatch.setattr("sys.stdin", stdin)
+    assert cli.main(["msg", "--repo", SENDER, "keripy-tls-pin", "-"]) == 2
+    assert store.load_held() == []
+    assert "stdin" in capsys.readouterr().err

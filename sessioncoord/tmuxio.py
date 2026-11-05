@@ -204,16 +204,38 @@ def _is_claude_from_ps(pid: int) -> bool:
     return procio.is_claude(argv)
 
 
+def _one_shot(pid: int) -> bool:
+    """A `claude -p` (or --print/--bg) run, judged only from the flags BEFORE the first
+    non-flag argument. Erring toward "session" is the safe side: a false one-shot would make
+    the sweep delete a live record, and without /proc `ps` splits a prompt such as
+    "retry with -p" on its spaces, so `procio.is_headless`'s whole-argv scan could misfire."""
+    for a in (procio.argv_of(pid) or [])[1:]:
+        if not a.startswith("-"):
+            return False
+        if a.split("=")[0] in procio.HEADLESS_FLAGS:
+            return True
+    return False
+
+
 def claude_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":
     """The claude under a pane, or None. Propagates Unknown rather than guessing."""
     seen: set[int] = set()
-    queue = list(kids.get(int(pane_pid), []))
+    # The walk starts AT the pane pid, not at its children. `tmux new-window ... claude "..."`
+    # makes claude the pane's own process, with no shell above it; starting one level down
+    # read that pane as empty, so every sweep deleted its live record, held mail never found
+    # it, and `msg` refused it as a plain shell (2026-11-05, keripy panes %162 and %180).
+    queue = [int(pane_pid)]
     while queue:
         pid = queue.pop(0)
         if pid in seen:
             continue
         seen.add(pid)
         if _is_claude(pid):
+            if _one_shot(pid):
+                # A `claude -p` one-shot has no prompt to receive anything; now that the pane's
+                # own process is examined, a pane started as one would otherwise read as a
+                # session and `send` would type into it.
+                continue
             return pid  # do not descend: a session's own subagents are not the session
         if procio.is_codex(_argv_of(pid)):
             continue  # a Claude started by a Codex tool is not the pane's session
