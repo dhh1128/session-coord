@@ -631,12 +631,28 @@ class _Doorbell:
         return f"  [{self.left} of {comms.BUDGET_PER_HOUR} doorbells left this hour]"
 
 
+# A message is prose for a peer's context, not a payload. Bounded so a runaway pipe cannot
+# make `msg peer -` hold an arbitrary amount in memory before any check runs.
+MSG_STDIN_LIMIT = 256 * 1024
+
+
 def cmd_msg(args) -> int:
     # `-` reads the body from stdin, as `zamu tell` does, so prose a command guard would
     # inspect need not appear in the command line. Before this, `msg <peer> - < file` sent a
     # body of exactly "-" and reported success (2026-11-05).
     if args.text == "-":
-        args.text = sys.stdin.read().strip("\n")
+        try:
+            raw = sys.stdin.buffer.read(MSG_STDIN_LIMIT + 1)
+            text = raw.decode("utf-8")
+        except (OSError, UnicodeDecodeError, AttributeError, ValueError) as e:
+            print(f"session-coord: could not read the body from stdin ({e}); nothing sent.",
+                  file=sys.stderr)
+            return 2
+        if len(raw) > MSG_STDIN_LIMIT:
+            print(f"session-coord: the body on stdin is over {MSG_STDIN_LIMIT} bytes; nothing "
+                  "sent. Put the detail in a file and send its path.", file=sys.stderr)
+            return 2
+        args.text = text.strip("\n")
         if not args.text.strip():
             print("session-coord: the body was `-` but stdin was empty; nothing sent.",
                   file=sys.stderr)

@@ -51,6 +51,7 @@ def test_panes_reports_a_root_claude_without_proc(no_proc, monkeypatch):  # noqa
     fake_ps(monkeypatch, {
         ("-A", "-o", "pid=,ppid="): (0, "100 1\n"),
         ("-o", "comm=", "-p", "100"): (0, "claude\n"),
+        ("-o", "args=", "-p", "100"): (0, "claude Read /tmp/brief.md\n"),
     })
     out = "%180\tbakobo:11\t100\t/repo/.worktrees/tls-pin\tKeripy TLS pin"
     table = tmuxio.panes(lambda argv: out)
@@ -73,3 +74,29 @@ def test_sweep_keeps_a_root_claude_session(tmp_path, monkeypatch):
     assert liveness.is_live(rec, pane_map, "3203")
     assert store.sweep(repo, pane_map, "3203") == []
     assert [p.session_id for p in store.load_all(repo)] == [rec.session_id]
+
+
+def test_a_one_shot_claude_pane_is_not_a_session(monkeypatch):
+    # Hostile pass p1.1: `tmux new-window claude -p "..."` runs a one-shot with no prompt to
+    # receive a message; reading it as a session would let `send` type into it and succeed.
+    monkeypatch.setattr(tmuxio, "_is_claude", lambda pid: pid == 100)
+    monkeypatch.setattr(tmuxio, "_argv_of", lambda pid: ["claude", "-p", "one-shot"])
+    monkeypatch.setattr(tmuxio.procio, "argv_of", lambda pid: ["claude", "-p", "one-shot"])
+    assert tmuxio.claude_under(100, {}) is None
+
+
+def test_a_one_shot_claude_under_a_shell_is_not_a_session(monkeypatch):
+    monkeypatch.setattr(tmuxio, "_is_claude", lambda pid: pid == 101)
+    argv = {100: ["bash"], 101: ["claude", "--print", "x"]}
+    monkeypatch.setattr(tmuxio, "_argv_of", argv.get)
+    monkeypatch.setattr(tmuxio.procio, "argv_of", argv.get)
+    assert tmuxio.claude_under(100, {100: [101]}) is None
+
+
+def test_a_prompt_mentioning_dash_p_is_still_a_session(monkeypatch):
+    # Without /proc, ps splits argv on spaces; a prompt word "-p" must not read as one-shot.
+    monkeypatch.setattr(tmuxio, "_is_claude", lambda pid: pid == 100)
+    argv = ["claude", "retry", "with", "-p", "please"]
+    monkeypatch.setattr(tmuxio, "_argv_of", lambda pid: argv)
+    monkeypatch.setattr(tmuxio.procio, "argv_of", lambda pid: argv)
+    assert tmuxio.claude_under(100, {}) == 100

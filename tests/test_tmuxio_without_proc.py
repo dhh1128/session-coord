@@ -139,6 +139,7 @@ class TestAPaneResolvesEndToEnd:
             ("-o", "comm=", "-p", "100"): (0, "bash\n"),
             ("-o", "args=", "-p", "100"): (0, "-bash\n"),
             ("-o", "comm=", "-p", "101"): (0, "claude\n"),
+            ("-o", "args=", "-p", "101"): (0, "claude\n"),
         })
         out = "%3\tmain:3\t100\t/repo\ttitle"
         result = tmuxio.panes(lambda argv: out)
