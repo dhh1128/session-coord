@@ -135,6 +135,9 @@ class TestAPaneResolvesEndToEnd:
     def test_the_claude_under_a_pane_is_found_without_proc(self, no_proc, monkeypatch):
         fake_ps(monkeypatch, {
             ("-A", "-o", "pid=,ppid="): (0, "100 1\n101 100\n"),
+            # The pane's own process is examined first; here it is the shell above claude.
+            ("-o", "comm=", "-p", "100"): (0, "bash\n"),
+            ("-o", "args=", "-p", "100"): (0, "-bash\n"),
             ("-o", "comm=", "-p", "101"): (0, "claude\n"),
         })
         out = "%3\tmain:3\t100\t/repo\ttitle"

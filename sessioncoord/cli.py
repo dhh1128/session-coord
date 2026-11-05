@@ -632,6 +632,15 @@ class _Doorbell:
 
 
 def cmd_msg(args) -> int:
+    # `-` reads the body from stdin, as `zamu tell` does, so prose a command guard would
+    # inspect need not appear in the command line. Before this, `msg <peer> - < file` sent a
+    # body of exactly "-" and reported success (2026-11-05).
+    if args.text == "-":
+        args.text = sys.stdin.read().strip("\n")
+        if not args.text.strip():
+            print("session-coord: the body was `-` but stdin was empty; nothing sent.",
+                  file=sys.stderr)
+            return 2
     # Look the target up on the board and pass its recorded pid. `send` documents expect_pid as
     # the guard against pane-id reuse, and the CLI was not using its own guard -- so a window
     # reassigned between the two resolutions would have been typed into as though it were the
@@ -1282,7 +1291,7 @@ def build_parser() -> argparse.ArgumentParser:
     m = sub.add_parser("msg", help="type a message into another session's prompt")
     repo_arg(m)
     m.add_argument("target", help="pane id (%%67), window label (infra:11) or session id")
-    m.add_argument("text")
+    m.add_argument("text", help="the message body; `-` reads it from stdin")
     m.add_argument("--subject", help="a short line shown above the body in the inbox")
     m.add_argument("--sender", help="how to label this message (default: this session's window)")
     m.add_argument("--force", action="store_true",

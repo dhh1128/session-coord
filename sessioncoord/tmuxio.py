@@ -207,7 +207,11 @@ def _is_claude_from_ps(pid: int) -> bool:
 def claude_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":
     """The claude under a pane, or None. Propagates Unknown rather than guessing."""
     seen: set[int] = set()
-    queue = list(kids.get(int(pane_pid), []))
+    # The walk starts AT the pane pid, not at its children. `tmux new-window ... claude "..."`
+    # makes claude the pane's own process, with no shell above it; starting one level down
+    # read that pane as empty, so every sweep deleted its live record, held mail never found
+    # it, and `msg` refused it as a plain shell (2026-11-05, keripy panes %162 and %180).
+    queue = [int(pane_pid)]
     while queue:
         pid = queue.pop(0)
         if pid in seen:
