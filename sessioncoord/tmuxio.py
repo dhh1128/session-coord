@@ -205,16 +205,19 @@ def _is_claude_from_ps(pid: int) -> bool:
 
 
 def _one_shot(pid: int) -> bool:
-    """A `claude -p` (or --print/--bg) run, judged only from the flags BEFORE the first
-    non-flag argument. Erring toward "session" is the safe side: a false one-shot would make
-    the sweep delete a live record, and without /proc `ps` splits a prompt such as
-    "retry with -p" on its spaces, so `procio.is_headless`'s whole-argv scan could misfire."""
-    for a in (procio.argv_of(pid) or [])[1:]:
-        if not a.startswith("-"):
-            return False
-        if a.split("=")[0] in procio.HEADLESS_FLAGS:
-            return True
-    return False
+    """A `claude -p` (or --print/--bg) run, judged ONLY by the first argument after the
+    program: `claude -p ...`, or `node .../cli.js -p ...` for an npm install.
+
+    Narrow on purpose. A false one-shot makes the sweep delete a live record, and anything
+    later in argv can be a prompt or a flag's value: `claude -- -p review` and
+    `claude --append-system-prompt -p` are both interactive sessions, and without /proc `ps`
+    splits a prompt on its spaces. A one-shot started with another flag first is missed and
+    read as a session, which is the behaviour before panes' own processes were examined."""
+    argv = procio.argv_of(pid) or []
+    first = 1 if argv and os.path.basename(argv[0]) == "claude" else 2
+    if len(argv) <= first:
+        return False
+    return argv[first].split("=")[0] in procio.HEADLESS_FLAGS
 
 
 def claude_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":

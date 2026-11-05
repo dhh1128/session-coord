@@ -100,3 +100,22 @@ def test_a_prompt_mentioning_dash_p_is_still_a_session(monkeypatch):
     monkeypatch.setattr(tmuxio, "_argv_of", lambda pid: argv)
     monkeypatch.setattr(tmuxio.procio, "argv_of", lambda pid: argv)
     assert tmuxio.claude_under(100, {}) == 100
+
+
+import pytest
+
+
+@pytest.mark.parametrize("argv,one_shot", [
+    (["claude", "-p", "x"], True),
+    (["claude", "--print", "x"], True),
+    (["claude", "--print=json"], True),
+    (["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js", "-p", "x"], True),
+    # Last-look p3.2 (~5zve): an interactive session whose prompt or flag value is "-p".
+    (["claude", "--", "-p", "review", "the", "diff"], False),
+    (["claude", "--append-system-prompt", "-p", "be", "careful"], False),
+    (["claude", "Read /tmp/brief.md"], False),
+    (["claude"], False),
+])
+def test_one_shot_is_judged_by_the_first_argument_after_the_program(monkeypatch, argv, one_shot):
+    monkeypatch.setattr(tmuxio.procio, "argv_of", lambda pid: argv)
+    assert tmuxio._one_shot(1) is one_shot

@@ -311,3 +311,12 @@ def test_a_dash_body_refuses_unreadable_or_oversized_stdin(estate, monkeypatch, 
     assert cli.main(["msg", "--repo", SENDER, "keripy-tls-pin", "-"]) == 2
     assert store.load_held() == []
     assert "stdin" in capsys.readouterr().err
+
+
+def test_a_crlf_stdin_body_is_delivered_with_plain_newlines(estate, monkeypatch):
+    # Last-look p3.3 (~3d2d): the binary read keeps CR, which validate then refuses.
+    hold_budget(estate)
+    estate.setattr(cli.tmuxio, "send", lambda *a, **kw: pytest.fail("budgeted send"))
+    monkeypatch.setattr("sys.stdin", _Stdin(b"hello\r\nworld\r\n"))
+    assert cli.main(["msg", "--repo", SENDER, "keripy-tls-pin", "-"]) == 0
+    assert [m.body for m in store.load_held()] == ["hello\nworld"]

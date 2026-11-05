@@ -652,7 +652,9 @@ def cmd_msg(args) -> int:
             print(f"session-coord: the body on stdin is over {MSG_STDIN_LIMIT} bytes; nothing "
                   "sent. Put the detail in a file and send its path.", file=sys.stderr)
             return 2
-        args.text = text.strip("\n")
+        # Text-mode stdin used to turn CRLF into LF; the byte read must do it explicitly, or
+        # validate refuses the CR as a control character.
+        args.text = text.replace("\r\n", "\n").strip("\n")
         if not args.text.strip():
             print("session-coord: the body was `-` but stdin was empty; nothing sent.",
                   file=sys.stderr)
