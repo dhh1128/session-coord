@@ -145,3 +145,21 @@ class TestTheQuestionReachesTheBoard:
                   "--path=b.md", "--session=me", "--require-claim"])
         found = json.loads(capsys.readouterr().out)
         assert [(f["code"], f["detail"]) for f in found] == [("unclaimed-path", "b.md")]
+
+
+class TestCopilotOnTen:
+    def test_an_absolute_root_star_owns_only_root_files(self):
+        board = Board.of(TREE, [rec(claims=(f"{TREE}/*",), charter="x")])
+        assert detect.unclaimed_paths(board, TREE, "me", ["top.md"]) == []
+        assert codes(detect.unclaimed_paths(board, TREE, "me", ["sub/file.md"])) == [
+            "unclaimed-path"]
+
+    @pytest.mark.parametrize("claim", ["[]", "a[", "[z-a].md"])
+    def test_a_malformed_glob_owns_nothing_and_does_not_raise(self, claim):
+        board = Board.of(TREE, [rec(claims=(claim,), charter="x")])
+        assert codes(detect.unclaimed_paths(board, TREE, "me", ["a.md"])) == ["unclaimed-path"]
+
+    @pytest.mark.parametrize("claim", [".", "./", TREE, TREE + "/"])
+    def test_a_root_claim_owns_every_file(self, claim):
+        board = Board.of(TREE, [rec(claims=(claim,), charter="x")])
+        assert detect.unclaimed_paths(board, TREE, "me", ["a.md", "sub/b.md"]) == []

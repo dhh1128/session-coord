@@ -171,7 +171,10 @@ def _claim_relative(claim: str, workdir: str, strip: bool = True) -> str | None:
     if not posixpath.isabs(c):
         return c
     root = posixpath.normpath(workdir)
-    if c.rstrip("/") == root or c.rstrip("/*") == root:
+    # The ownership side (strip=False) reads `/repo/*` as `*`, one root segment, through the
+    # prefix branch below. Collapsing it to `**` is safe only where a match refuses (Copilot
+    # on #10).
+    if c.rstrip("/") == root or (strip and c.rstrip("/*") == root):
         return "**"
     if c.startswith(root + "/"):
         return c[len(root) + 1:]
@@ -271,8 +274,16 @@ def _claim_owns(claim: str, path: str) -> bool:
     `docs/owned.md` for `docs` (hostile pass on #10, finding 1). Exact, case-sensitive, no
     trimming; a refusal on a case-insensitive filesystem is the safe error.
     """
+    if claim in (".", "**"):
+        # The repo root: `claim -- .` or an absolute claim of the tree itself (Copilot on #10).
+        return True
     if any(ch in claim for ch in "*?["):
-        return re.fullmatch(_glob_regex(claim.rstrip("/")), path) is not None
+        try:
+            return re.fullmatch(_glob_regex(claim.rstrip("/")), path) is not None
+        except re.error:
+            # A malformed glob such as `[]` owns nothing. Raising would turn one bad claim
+            # into a board the gate cannot ask, refusing every commit (Copilot on #10).
+            return False
     c = claim.rstrip("/")
     return path == c or path.startswith(c + "/")
 
