@@ -7,6 +7,8 @@ thing most able to do damage -- so every refusal it makes is pinned.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from sessioncoord import gitio, tmuxio
 from sessioncoord.tmuxio import SendRefused
@@ -33,8 +35,11 @@ class TestRepoRoot:
         # in four worktrees would register as four unrelated repos and nothing would ever fire.
         run = FakeGit({"git rev-parse --path-format=absolute --git-common-dir":
                        "/home/user/code/acme/infra/.git"})
+        # Compared through realpath because repo_root resolves symlinks, and on macOS /home
+        # is one (to /System/Volumes/Data/home), so the literal fails there while the code is
+        # right.
         assert gitio.repo_root("/home/user/code/acme/infra/.worktrees/cyber",
-                               run) == "/home/user/code/acme/infra"
+                               run) == os.path.realpath("/home/user/code/acme/infra")
 
     def test_outside_a_repo_is_none_not_a_crash(self):
         assert gitio.repo_root("/tmp", FakeGit({})) is None

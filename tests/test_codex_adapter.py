@@ -327,7 +327,9 @@ def test_session_start_hook_registers_codex_process(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: (
         calls.append((argv, kwargs)) or SimpleNamespace(returncode=0, stdout="")))
     assert module["main"]() == 0
-    argv, opts = calls[0]
+    # Only the register call. Without /proc (macOS) the hook also asks `ps` about the codex
+    # process, and that call comes first.
+    argv, opts = next(c for c in calls if c[0][1:2] == ["register"])
     assert argv[1:5] == ["register", "--engine", "codex", "--session"]
     assert "--pid" in argv and argv[argv.index("--pid") + 1] == "1234"
     assert "--pane" in argv and argv[argv.index("--pane") + 1] == "%3"
@@ -347,7 +349,8 @@ def test_session_start_hook_registers_a_forked_thread(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: (
         calls.append(argv) or SimpleNamespace(returncode=0, stdout="")))
     assert module["main"]() == 0
-    assert calls and "thread-1" in calls[0]
+    registers = [c for c in calls if c[1:2] == ["register"]]
+    assert registers and "thread-1" in registers[0]
 
 
 @pytest.mark.parametrize("args", [["e"], ["review"],
@@ -378,7 +381,8 @@ def test_session_start_hook_accepts_review_as_directory_name(monkeypatch, tmp_pa
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: (
         calls.append(argv) or SimpleNamespace(returncode=0, stdout="")))
     assert module["main"]() == 0
-    assert calls and "thread-1" in calls[0]
+    registers = [c for c in calls if c[1:2] == ["register"]]
+    assert registers and "thread-1" in registers[0]
 
 
 def test_session_start_hook_accepts_exec_as_separate_image_value(monkeypatch, tmp_path):
@@ -393,7 +397,8 @@ def test_session_start_hook_accepts_exec_as_separate_image_value(monkeypatch, tm
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: (
         calls.append(argv) or SimpleNamespace(returncode=0, stdout="")))
     assert module["main"]() == 0
-    assert calls and "thread-1" in calls[0]
+    registers = [c for c in calls if c[1:2] == ["register"]]
+    assert registers and "thread-1" in registers[0]
 
 
 def test_codex_pretool_payload_reaches_shared_tree_gate(tmp_path):
