@@ -38,3 +38,12 @@ def _no_live_tmux(monkeypatch):
 def _no_real_hosts(monkeypatch, tmp_path):
     """`msg` reads the hosts file on every send, so the box's real one must not leak in."""
     monkeypatch.setenv("SESSION_COORD_HOSTS", str(tmp_path / "no-hosts"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_engine_walk(monkeypatch):
+    """`procio.nearest_engine` walks the REAL process tree, so the suite would behave differently
+    under Claude, under a Codex TUI and under Codex's shared daemon. No engine is the neutral
+    answer; a test about engine ancestry sets its own."""
+    from sessioncoord import procio
+    monkeypatch.setattr(procio, "nearest_engine", lambda pid=None: None)

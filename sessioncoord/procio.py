@@ -176,6 +176,50 @@ def is_codex_headless(argv: list[str] | None) -> bool:
     return False
 
 
+CODEX_SERVERS = frozenset({"app-server", "exec-server"})
+
+
+def is_codex_server(argv: list[str] | None) -> bool:
+    """A Codex server process, such as the shared `codex app-server` daemon.
+
+    Codex 0.163 and later run a TUI's tools and hooks inside a per-user daemon unless the TUI
+    was started with `--no-daemon` or a `-c` override. The daemon is a child of whichever TUI
+    started it, it inherited that TUI's environment, and later TUIs attach to its socket. So
+    under it, the ancestry, `TMUX_PANE` and `PATH` all describe the FIRST TUI, not the caller.
+    """
+    if not is_codex_headless(argv):
+        return False
+    rest = argv[2:] if os.path.basename(argv[0]) == "node" else argv[1:]
+    return next((a for a in rest if not a.startswith("-")), None) in CODEX_SERVERS
+
+
+def nearest_engine(pid: int | None = None) -> tuple[str, int] | None:
+    """The nearest engine process above `pid`: ("claude", pid), ("codex", pid) or
+    ("codex-server", pid). None when there is none or the walk could not finish.
+
+    One walk, so a Claude started by a Codex tool (or the reverse) is attributed to the engine
+    it actually runs under rather than to whichever check happened to run first.
+    """
+    pid = os.getpid() if pid is None else pid
+    for _ in range(16):
+        ppid = parent_of(pid)
+        if ppid is None or ppid <= 1:
+            return None
+        argv = argv_of(ppid)
+        if is_claude(argv):
+            return ("claude", ppid)
+        if is_codex(argv):
+            return ("codex-server" if is_codex_server(argv) else "codex", ppid)
+        pid = ppid
+    return None
+
+
+def under_codex_server(pid: int | None = None) -> bool:
+    """True when the caller runs under Codex's shared daemon, whose environment is not its own."""
+    found = nearest_engine(pid)
+    return found is not None and found[0] == "codex-server"
+
+
 def claude_ancestor(pid: int | None = None) -> int | None:
     """The nearest `claude` process above `pid` (default: this process), or None."""
     pid = os.getpid() if pid is None else pid
