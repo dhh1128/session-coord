@@ -875,16 +875,18 @@ def cmd_msg(args) -> int:
         # at. A session id is what the cross-box sender line gives as the reply address, so it
         # has to mean that session even when some other session -- in this repo, which is
         # searched first -- carries a title equal to it (hostile pass on cross-host). A session
-        # with records in several repos reads the inbox of the one it is in now, so take the
-        # local record, else the one record whose pane is still live, else refuse below as
-        # ambiguous. Never guess by timestamp: a stale record can be the newest one.
+        # with records in several repos reads the inbox of the one it is in now, and the only
+        # evidence of which that is, is a pane tmux shows right now. So: the one record whose
+        # pane is in the live table, else the only record there is, else refuse below as
+        # ambiguous. Not the sender's repo first: a dead record there took the mail (last
+        # look on cross-host). Not a stored pane when tmux could not be read: `_live` leaves
+        # it as recorded, so it proves nothing. Never a timestamp: a stale record can be newest.
         by_id = [(r, p) for r in [repo] + [o for o in store.known_repos() if o != repo]
                  for p in live_in(r) if p.session_id == args.target]
         if by_id:
-            local = [x for x in by_id if x[0] == repo]
-            paned = [x for x in by_id if x[1].pane]
-            pick = local[:1] or (paned if len(paned) == 1 else []) or (
-                by_id if len(by_id) == 1 else [])
+            paned = [x for x in by_id
+                     if table is not None and isinstance(x[1].pane, str) and x[1].pane in table]
+            pick = (paned if len(paned) == 1 else []) or (by_id if len(by_id) == 1 else [])
             if pick:
                 recipient_repo, hits = pick[0][0], [pick[0][1]]
             else:

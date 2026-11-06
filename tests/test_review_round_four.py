@@ -162,9 +162,23 @@ class TestMsgAcceptsASessionIdTarget:
         store.save(Presence(session_id="sid", repo_root="/abandoned", workdir="/abandoned",
                             pane=None, claude_pid=111, updated="2026-11-06T11:00:00+00:00"))
         monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **k: "%1")
-        assert cli.main(["msg", "--repo", "/repo", "sid", "hi"]) == 0
-        assert [m.recipient for m in store.load_inbox("/current")] == ["sid"]
+        monkeypatch.setattr(cli, "_live_table", lambda: {
+            "%1": {"pane": "%1", "window": "me:1", "claude_pid": 111, "title": ""}})
+        # From the abandoned repo too: the sender's own repo does not get first refusal.
+        for sender_repo in ("/repo", "/abandoned"):
+            assert cli.main(["msg", "--repo", sender_repo, "sid", "hi"]) == 0
+        assert [m.recipient for m in store.load_inbox("/current")] == ["sid", "sid"]
         assert store.load_inbox("/abandoned") == []
+
+    def test_a_stored_pane_proves_nothing_when_tmux_was_not_read(
+            self, home, fake_world, capsys):
+        # conftest makes _live_table return None: tmux could not be asked.
+        store.save(Presence(session_id="sid", repo_root="/evil", workdir="/evil",
+                            pane="%9", claude_pid=1))
+        store.save(Presence(session_id="sid", repo_root="/current", workdir="/current",
+                            pane=None, claude_pid=1))
+        assert cli.main(["msg", "--repo", "/third", "sid", "captured"]) == 2
+        assert store.load_inbox("/evil") == [] and store.load_inbox("/current") == []
 
     def test_a_session_id_with_no_way_to_choose_is_refused_not_guessed(
             self, home, fake_world, capsys):
