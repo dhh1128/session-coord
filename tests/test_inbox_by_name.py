@@ -320,3 +320,53 @@ def test_a_crlf_stdin_body_is_delivered_with_plain_newlines(estate, monkeypatch)
     monkeypatch.setattr("sys.stdin", _Stdin(b"hello\r\nworld\r\n"))
     assert cli.main(["msg", "--repo", SENDER, "keripy-tls-pin", "-"]) == 0
     assert [m.body for m in store.load_held()] == ["hello\nworld"]
+
+
+# ----- held mail expires after 72 hours (2026-11-05) -------------------------------------
+
+def _held(mid, created, recipient="foreman-imbu"):
+    return inbox.Message(id=mid, sender="a peer", recipient=recipient, body=f"body {mid}",
+                         created=created)
+
+
+def test_unexpired_held_keeps_fresh_and_drops_stale_and_unreadable():
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 11, 5, 12, tzinfo=timezone.utc)
+    iso = lambda d: d.isoformat(timespec="seconds")
+    msgs = [
+        _held("fresh", iso(now - timedelta(hours=71))),
+        _held("edge", iso(now - store.HELD_TTL)),
+        _held("stale", iso(now - timedelta(hours=73))),
+        _held("empty", ""),
+        _held("garbage", "last tuesday"),
+        _held("naive", "2026-11-05T11:00:00"),
+        _held("future", iso(now + timedelta(days=30))),
+        _held("skewed", iso(now + timedelta(minutes=10))),
+    ]
+    kept, expired = store.unexpired_held(msgs, now)
+    assert [m.id for m in kept] == ["fresh", "edge", "skewed"]
+    assert [m.id for m in expired] == ["stale", "empty", "garbage", "naive", "future"]
+
+
+def test_a_new_hold_prunes_expired_mail_and_states_the_deadline(estate, capsys):
+    hold_budget(estate)
+    store.save_held([_held("old", "2026-10-13T00:00:00+00:00", "someone-gone")])
+    assert cli.main(["msg", "--repo", SENDER, "Foreman-Imbu", "new body"]) == 0
+    assert "within 72 hours" in capsys.readouterr().out
+    assert [m.body for m in store.load_held()] == ["new body"]
+
+
+def test_reading_an_inbox_prunes_expired_held_mail_it_does_not_deliver(estate, capsys):
+    store.save_held([_held("old", "2026-10-13T00:00:00+00:00", "someone-gone"),
+                     _held("bad", "", "someone-gone")])
+    assert cli.main(["inbox", "--repo", SENDER]) == 0
+    assert store.load_held() == []
+
+
+def test_expired_held_mail_is_never_delivered_to_its_name(estate, capsys):
+    store.save_held([_held("old", "2026-10-13T00:00:00+00:00")])
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "body old" not in capsys.readouterr().out
+    assert store.load_inbox(OTHER) == [] and store.load_held() == []

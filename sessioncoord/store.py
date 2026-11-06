@@ -26,7 +26,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -369,6 +369,36 @@ def quarantine_held() -> Path | None:
     except OSError:
         return None
     return dest
+
+
+#: How long held mail waits for a session to take its name. 2026-11-05: held.json on kelun had
+#: 278 unread messages going back to 2026-10-13, every one addressed to a name no session had
+#: taken since. Mail that old describes a state of the work nobody is in any more, so delivering
+#: it late is worse than not delivering it, and the sender is told the deadline when it holds.
+HELD_TTL = timedelta(hours=72)
+#: A `created` this far ahead of the clock is treated as unreadable. Without a bound, one bad
+#: timestamp sits in the queue forever -- the `inf` case from the budget log, one file over.
+_SKEW = timedelta(hours=1)
+
+
+def unexpired_held(messages: Iterable[Message],
+                   now: datetime | None = None) -> tuple[list[Message], list[Message]]:
+    """(kept, expired). Expires mail older than HELD_TTL.
+
+    A `created` that cannot be read -- empty, malformed, without a timezone, or more than an
+    hour in the future -- counts as expired rather than kept: kept, it could never age out,
+    which is the failure this exists to end. Pure, so the caller decides when to write.
+    """
+    now = now or datetime.now(timezone.utc)
+    kept, expired = [], []
+    for m in messages:
+        try:
+            t = datetime.fromisoformat(m.created)
+            fresh = (t.tzinfo is not None and t <= now + _SKEW and now - t <= HELD_TTL)
+        except (TypeError, ValueError):
+            fresh = False
+        (kept if fresh else expired).append(m)
+    return kept, expired
 
 
 def save_held(messages: Iterable[Message]) -> Path:

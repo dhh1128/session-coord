@@ -886,6 +886,7 @@ def cmd_msg(args) -> int:
                       "nothing in it was lost, but nobody has read it either.",
                       file=sys.stderr)
                 queue = []
+            queue, _ = store.unexpired_held(queue)
             queue.append(inbox_mod.Message(
                 id=f"held-{uuid.uuid4().hex}", sender=sender or "a peer", recipient=key,
                 sender_name=me.name if me else "", body=args.text, created=_now(),
@@ -894,8 +895,10 @@ def cmd_msg(args) -> int:
     except locks.Busy as e:
         print(f"session-coord: {e}", file=sys.stderr)
         return 75
+    hours = int(store.HELD_TTL.total_seconds() // 3600)
     print(f"held for {args.target}; it will be delivered at the start of the next turn of "
-          f"a session with that name ({refused})")
+          f"a session with that name, if one takes a turn within {hours} hours, and dropped "
+          f"after that ({refused})")
     return 0
 
 
@@ -1109,6 +1112,13 @@ def cmd_inbox(args) -> int:
                 except store.UnreadableQueue as e:
                     print(f"session-coord: {e}; held mail was left unchanged.", file=sys.stderr)
                     held = []
+            # Expire under the lock, and write the pruned queue back even when nothing below
+            # is delivered: otherwise mail for a name nobody takes is re-read on every turn of
+            # every session in the estate, forever.
+            if held:
+                held, expired = store.unexpired_held(held)
+                if expired:
+                    store.save_held(held)
             # Saving the inbox first means a crash between the two writes can repeat a
             # message, but cannot lose it; the next read recognizes its id and finishes
             # removing it from held mail. Moving on peek leaves it unread for the hook's
