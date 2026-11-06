@@ -133,3 +133,15 @@ def facts(repo: str, run: Runner = _run) -> RepoFacts:
         dirty_paths=dirty_paths(repo, run),
         shared_checkout=shared_checkout(repo, dflt, run),
     )
+
+
+def worktrees(repo: str, run: Runner = _run) -> list[tuple[str, str]]:
+    """(path, branch) for every worktree of `repo`, the main checkout included."""
+    out, path = [], ""
+    for line in run(["git", "worktree", "list", "--porcelain"], repo).splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+            out.append((path, ""))
+        elif line.startswith("branch ") and out:
+            out[-1] = (path, line[len("branch "):].removeprefix("refs/heads/"))
+    return out

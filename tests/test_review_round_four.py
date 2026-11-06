@@ -144,6 +144,53 @@ class TestMsgAcceptsASessionIdTarget:
         assert cli.main(["msg", "--repo", "/repo", "7df6c2fe-b110", "a message"]) == 0
         assert seen["target"] == "%74" and seen["pid"] == 171425
 
+    def test_a_session_id_beats_a_local_title_equal_to_it(self, home, fake_world, monkeypatch):
+        # The cross-box sender line gives a session id as the reply address. A session HERE
+        # titled with that id used to capture the reply, because titles were matched in the
+        # same pass and this repo is searched first (hostile pass on cross-host).
+        store.save(Presence(session_id="victim-id", repo_root="/other", workdir="/other",
+                            pane=None, claude_pid=333, title="the real one"))
+        store.save(rec("attacker", pane=None, pid=111, title="victim-id", named=True))
+        assert cli.main(["msg", "--repo", "/repo", "victim-id", "private"]) == 0
+        assert [m.recipient for m in store.load_inbox("/other")] == ["victim-id"]
+        assert store.load_inbox("/repo") == []
+
+    def test_a_session_id_in_several_repos_goes_to_the_one_with_a_live_pane(
+            self, home, fake_world, monkeypatch):
+        store.save(Presence(session_id="sid", repo_root="/current", workdir="/current",
+                            pane="%1", claude_pid=111, updated="2026-11-06T10:00:00+00:00"))
+        store.save(Presence(session_id="sid", repo_root="/abandoned", workdir="/abandoned",
+                            pane=None, claude_pid=111, updated="2026-11-06T11:00:00+00:00"))
+        monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **k: "%1")
+        monkeypatch.setattr(cli, "_live_table", lambda: {
+            "%1": {"pane": "%1", "window": "me:1", "claude_pid": 111, "title": ""}})
+        # From the abandoned repo too: the sender's own repo does not get first refusal.
+        for sender_repo in ("/repo", "/abandoned"):
+            assert cli.main(["msg", "--repo", sender_repo, "sid", "hi"]) == 0
+        assert [m.recipient for m in store.load_inbox("/current")] == ["sid", "sid"]
+        assert store.load_inbox("/abandoned") == []
+
+    def test_a_stored_pane_proves_nothing_when_tmux_was_not_read(
+            self, home, fake_world, capsys):
+        # conftest makes _live_table return None: tmux could not be asked.
+        store.save(Presence(session_id="sid", repo_root="/evil", workdir="/evil",
+                            pane="%9", claude_pid=1))
+        store.save(Presence(session_id="sid", repo_root="/current", workdir="/current",
+                            pane=None, claude_pid=1))
+        assert cli.main(["msg", "--repo", "/third", "sid", "captured"]) == 2
+        assert store.load_inbox("/evil") == [] and store.load_inbox("/current") == []
+
+    def test_a_session_id_with_no_way_to_choose_is_refused_not_guessed(
+            self, home, fake_world, capsys):
+        # Neither record has a pane, and one has no timestamp: refused, without comparing.
+        store.save(Presence(session_id="sid", repo_root="/a", workdir="/a", pane=None,
+                            claude_pid=1, updated=None))
+        store.save(Presence(session_id="sid", repo_root="/b", workdir="/b", pane=None,
+                            claude_pid=1, updated="2026-11-06T11:00:00+00:00"))
+        assert cli.main(["msg", "--repo", "/repo", "sid", "hi"]) == 2
+        assert "does not name one" in capsys.readouterr().err
+        assert store.load_inbox("/a") == [] and store.load_inbox("/b") == []
+
     def test_a_pane_target_is_left_alone(self, home, fake_world, monkeypatch):
         store.save(rec("s1", pane="%74", pid=171425))
         seen = {}
@@ -151,3 +198,18 @@ class TestMsgAcceptsASessionIdTarget:
                             lambda t, x, run=None, expect_pid=None, **kw: seen.update(target=t) or t)
         cli.main(["msg", "--repo", "/repo", "%74", "a message"])
         assert seen["target"] == "%74"
+
+
+class TestNoRingFilesWithoutRinging:
+    """What a remote sender over its budget asks for: the mail is filed, the pane untouched."""
+
+    def test_a_registered_peer_is_filed_and_not_rung(self, home, fake_world, monkeypatch):
+        store.save(rec("peer", pane="%74", pid=171425))
+        monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **k: pytest.fail("rang"))
+        assert cli.main(["msg", "--repo", "/repo", "peer", "hi", "--no-ring"]) == 0
+        assert [m.recipient for m in store.load_inbox("/repo")] == ["peer"]
+
+    def test_an_unregistered_name_is_held_and_not_typed(self, home, fake_world, monkeypatch):
+        monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **k: pytest.fail("typed"))
+        assert cli.main(["msg", "--repo", "/repo", "nobody-yet", "hi", "--no-ring"]) == 0
+        assert [m.recipient for m in store.load_held()] == ["nobody-yet"]

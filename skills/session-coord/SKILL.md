@@ -29,6 +29,8 @@ session-coord conductor show # who is sequencing
 
 If you are alone, all three are nearly silent and you should carry on. Nothing below applies.
 
+**Once, when this skill loads, also run `session-coord board --hosts`** if the user works on more than one machine. It asks each box listed in `~/.config/session-coord/hosts` (one name per line, the same file on every box) who is working there, over ssh, in at most five seconds. It shows sessions on other boxes working in this same repo (matched by `origin`, since paths differ between machines), and any worktree of this repo over there that no session is registered in. Everything else is one line per box; `--all` lists it. Offline boxes are skipped at once with when they were last seen, and a box that does not answer shows its last answer with its age. With no hosts file, or the network off, you get one line and the local board. No hook ever does this, so a session that skips this step simply does not see the other boxes.
+
 A *project* here is the git repository you are in, or, outside git, the nearest folder above you that contains a `CLAUDE.md`, a `.claude/` directory or an empty `.session-coord` marker file — else the folder itself. Sessions see each other only when they resolve to the same project, so if two sessions that should see each other do not, put a `.session-coord` file in the folder that contains them both.
 
 ## Say who you are, what you are for, and what you will write
@@ -44,6 +46,8 @@ session-coord register --name "tam-sizing" \
 **Claims are how the collision nobody can see gets caught.** In git, a file can read identically on both sides of a merge and still be wrong, because two sessions each made an edit that is right alone and contradictory together; in a folder of drafts there is not even a merge to look at. Claim the files you will *write* — the synthesis, the memo, the deck, the file carrying a count or a list — not every file you might read. One session owns each output document. If you need a change in a document another session claims, message that session rather than editing it.
 
 **A claim means you get told, not that you hold the pen.** If a peer needs one line in a file you claimed, the answer is usually "go ahead, tell me when it lands". Claim to be consulted, not to block.
+
+**Register in the repo you are working in, not only the one you started in.** A session started in one repo that does its work in another repo's worktree is invisible on that repo's board, and every peer there will think the branch is unowned. Run `session-coord register --repo <that repo> --cwd <its worktree> --charter '...'` when you start working there; a session may have a record in several repos.
 
 **Registration is a snapshot.** Re-register when your charter changes, and in git after you move to a worktree — `register` warns you when the directory it has recorded is not the one you are in.
 
@@ -98,6 +102,10 @@ session-coord msg "legal-memo" "tam-sizing here. The TAM figure in drafts/market
 Under tmux, a short doorbell (` >>> session-coord inbox`) is also typed into the peer's prompt, which wakes a session that would otherwise sit idle. A Codex pane is rung only when its `›` input is visibly idle; an unreadable Codex prompt leaves the mail filed for its next turn. Outside tmux there is no doorbell: the message waits for that session's next turn, and an idle session reads it when the user next switches to it. If a peer needs to act *now* and is idle, that is the one case to tell the user, in one line: "switch to *legal-memo*; it has a message that changes its section 3."
 
 Say who you are in the message. Do **not** use messages to poll peers for opinions.
+
+**A session on another box is addressed as `name@host`**, exactly as `board --hosts` prints it: `session-coord msg "kelun-handoff@kelun" - < note.txt`. The message goes over ssh to session-coord on that box, which files and rings it there as if it were sent locally, and the sender line reads `<your name>@<this box>`, so the recipient can answer the same way. Only a host in the hosts file routes, so an `@` in an ordinary session name stays local. When the two sessions are sequencing work, say in the message what the other should wait for, and file yourself an item to message them when it happens: nothing does that for you across boxes.
+
+In a Codex sandbox with the network off, `board --hosts` and `msg name@host` say so and send nothing. Run them with network access.
 
 ### Before you ring: what does the recipient do differently?
 

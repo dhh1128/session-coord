@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -25,7 +26,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from . import asks as asks_mod
-from . import comms, detect, gitio, harvest, locks, procio, store, tmuxio
+from . import comms, detect, gitio, harvest, locks, procio, remote, store, tmuxio
 from . import inbox as inbox_mod
 from .model import Ask, Board, CONDUCTOR, Presence
 
@@ -340,7 +341,48 @@ def _register_locked(args, repo: str) -> int:
     return 0
 
 
+def _estate_view() -> dict:
+    """Every live session on this box, in the shape a peer box reads over ssh.
+
+    Read-only: no sweep, since a peer asking must not mutate this box's records, and a
+    stale record costs one extra line on someone else's board.
+    """
+    table = _live_table()
+    out = []
+    for repo in store.known_repos():
+        origin = remote.origin_of(repo)
+        for p in _live(store.load_all(repo), table):
+            out.append({"name": p.name, "label": p.label, "repo_root": p.repo_root,
+                        "workdir": p.workdir, "branch": p.branch, "charter": p.charter,
+                        "claims": list(p.claims), "role": p.role, "origin": origin,
+                        "engine": p.engine})
+    # Worktrees too, because a session's registration and its work can be in different
+    # repos. On 2026-11-06 a kelun session registered in devenv was working in
+    # session-coord/.worktrees/codex-appserver, so a board matched on origin missed it; what
+    # found it was listing that repo's worktrees by hand.
+    trees = []
+    # Not only repos with a registrant: the case this exists for is a session registered in
+    # one repo working in another, which may have no registrant at all (Copilot on PR #12).
+    roots = set(store.known_repos())
+    for s in out:
+        root = gitio.repo_root(s["workdir"]) if s["workdir"] else None
+        if root:
+            roots.add(root)
+    for repo in sorted(roots):
+        origin = remote.origin_of(repo)
+        for path, branch in gitio.worktrees(repo):
+            if os.path.realpath(path) != os.path.realpath(repo):
+                trees.append({"repo_root": repo, "origin": origin, "path": path,
+                              "branch": branch})
+    return {"host": remote.local_host(), "sessions": out, "worktrees": trees}
+
+
 def cmd_board(args) -> int:
+    if getattr(args, "estate", False):
+        # What a peer box fetches. The only output is the JSON, so a remote parse never has
+        # to step around a warning.
+        print(json.dumps(_estate_view()))
+        return 0
     repo = _resolve_repo(args)
     if repo is None:
         print("session-coord: not a git repo.", file=sys.stderr)
@@ -349,9 +391,18 @@ def cmd_board(args) -> int:
     if args.json:
         print(json.dumps([json.loads(s.to_json()) for s in board.sessions], indent=2))
         return 0
-    if args.quiet and len(board.sessions) < 2:
+    hosts = remote.load_hosts() if getattr(args, "hosts", False) else []
+    if args.quiet and len(board.sessions) < 2 and not hosts:
         return 0
     sys.stdout.write(_render_board(board))
+    if getattr(args, "hosts", False):
+        if not hosts:
+            print(f"on other boxes: none configured (list them, one per line, in "
+                  f"{remote.hosts_path()})")
+            return 0
+        views, note = remote.fetch(hosts)
+        sys.stdout.write(remote.render(views, remote.origin_of(repo), note,
+                                       show_all=getattr(args, "all", False)))
     return 0
 
 
@@ -692,6 +743,92 @@ class _Doorbell:
 MSG_STDIN_LIMIT = 256 * 1024
 
 
+def _reply_address(value: str) -> str:
+    """A remote sender's reply address, or "" when it is not one.
+
+    It is printed as a command to paste, so only the shape `_msg_remote` sends is accepted:
+    a session id and a host name, nothing a shell would expand.
+    """
+    v = (value or "").strip()
+    return v if re.fullmatch(r"[A-Za-z0-9._-]{1,128}@[A-Za-z0-9._-]{1,64}", v) else ""
+
+
+def _msg_remote(args, name: str, host) -> int:
+    """`msg name@host`: hand the message to session-coord on that box, body on stdin.
+
+    The remote side files and rings exactly as a local send would, so held mail, the inbox
+    and the doorbell all behave the same; only the sender label says where it came from.
+    """
+    # The recipient answers by pasting what it was given, so the sender line has to carry an
+    # address that still works when it does. Not the label, which carries "(now me:2)", and
+    # not only the name: a title changes when the session is renamed and a window number when
+    # another window closes. The session id lasts as long as the session, and `msg` resolves
+    # it exactly on the far side. The name stays first because it is what a reader recognises.
+    me = _me_anywhere(_resolve_repo(args))
+    here = remote.local_host()
+    if args.sender:
+        sender = f"{args.sender}@{here}"
+    elif me:
+        sender = f"{me.name}@{here} (reply to {me.session_id}@{here})"
+    else:
+        sender = f"a peer@{here}"
+    # The reply address goes across separately: over ssh the far box has no record of this
+    # session, so without it the recipient is told to reply to nobody (Copilot on PR #12).
+    reply_to = f"{me.session_id}@{here}" if me else ""
+    argv = ["msg", name, "-", "--sender", sender, *(["--sender-name", reply_to] if reply_to else []),
+            "--reply", getattr(args, "reply", comms.REPLY_NONE)]
+    if args.subject:
+        argv += ["--subject", args.subject]
+    if getattr(args, "override", ""):
+        argv += ["--override", args.override]
+    # The pane-reuse guard and --force mean the same thing on the far box, where the pid lives.
+    if args.pid is not None:
+        argv += ["--pid", str(args.pid)]
+    if args.force:
+        argv += ["--force"]
+    blocked = remote.sandboxed()
+    if blocked:
+        print(f"session-coord: nothing sent to {name}@{host.name}: {blocked}.", file=sys.stderr)
+        return 2
+    # The doorbell budget is charged HERE, where the sender is known. Over ssh the far box sees
+    # only a display string and cannot attribute the send, so it would exempt every remote
+    # message from the limit (hostile pass on PR #12). Over budget, the message is still filed
+    # there, just not rung, which is the same rule as a local send.
+    sender_id = me.session_id if me else ""
+    bell = _Doorbell(_resolve_repo(args), sender_id, f"{name}@{host.name}",
+                     getattr(args, "reply", comms.REPLY_NONE),
+                     (getattr(args, "override", "") or "").strip())
+    refused = bell.reserve()
+    if refused:
+        argv += ["--no-ring"]
+        print(f"session-coord: filing for {name}@{host.name} without ringing: {refused}",
+              file=sys.stderr)
+    body = args.text.encode("utf-8")
+    try:
+        proc = remote._spawn(remote.remote_argv(host, *argv), stdin=body)
+        out, err = proc.communicate(body, timeout=20)
+    except subprocess.TimeoutExpired:
+        remote._kill(proc)
+        try:
+            proc.wait(timeout=1.0)  # not communicate(): a forked child may hold the pipes
+        except subprocess.TimeoutExpired:
+            pass
+        print(f"session-coord: {host.name} did not answer within 20s; the message may or may "
+              "not have been filed there.", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"session-coord: could not start ssh to {host.name} ({e}); nothing sent.",
+              file=sys.stderr)
+        return 2
+    sys.stdout.write(out.decode("utf-8", "replace"))
+    text = err.decode("utf-8", "replace")
+    if proc.returncode == 255:
+        text = (f"session-coord: ssh to {host.name} failed, so nothing was sent. "
+                f"{text.strip()}\n")
+    sys.stderr.write(text)
+    return proc.returncode
+
+
 def cmd_msg(args) -> int:
     # `-` reads the body from stdin, as `zamu tell` does, so prose a command guard would
     # inspect need not appear in the command line. Before this, `msg <peer> - < file` sent a
@@ -715,6 +852,11 @@ def cmd_msg(args) -> int:
             print("session-coord: the body was `-` but stdin was empty; nothing sent.",
                   file=sys.stderr)
             return 2
+    # `name@host` goes to that box, but only when `host` is in the hosts file: an `@` in an
+    # ordinary pane title must keep meaning a local session.
+    routed = remote.split_address(args.target, remote.load_hosts())
+    if routed:
+        return _msg_remote(args, *routed)
     # Look the target up on the board and pass its recorded pid. `send` documents expect_pid as
     # the guard against pane-id reuse, and the CLI was not using its own guard -- so a window
     # reassigned between the two resolutions would have been typed into as though it were the
@@ -765,7 +907,28 @@ def cmd_msg(args) -> int:
         # mistaken for an unregistered target, then lost when the direct-send budget ran
         # out. Keep local resolution first, but search the estate before deciding no inbox
         # exists. The recipient's repo owns the queue, regardless of the sender's cwd.
-        hits, recipient_repo = search(primary)
+        # Tier zero: an exact session id, across the whole estate, before any title is looked
+        # at. A session id is what the cross-box sender line gives as the reply address, so it
+        # has to mean that session even when some other session -- in this repo, which is
+        # searched first -- carries a title equal to it (hostile pass on cross-host). A session
+        # with records in several repos reads the inbox of the one it is in now, and the only
+        # evidence of which that is, is a pane tmux shows right now. So: the one record whose
+        # pane is in the live table, else the only record there is, else refuse below as
+        # ambiguous. Not the sender's repo first: a dead record there took the mail (last
+        # look on cross-host). Not a stored pane when tmux could not be read: `_live` leaves
+        # it as recorded, so it proves nothing. Never a timestamp: a stale record can be newest.
+        by_id = [(r, p) for r in [repo] + [o for o in store.known_repos() if o != repo]
+                 for p in live_in(r) if p.session_id == args.target]
+        if by_id:
+            paned = [x for x in by_id
+                     if table is not None and isinstance(x[1].pane, str) and x[1].pane in table]
+            pick = (paned if len(paned) == 1 else []) or (by_id if len(by_id) == 1 else [])
+            if pick:
+                recipient_repo, hits = pick[0][0], [pick[0][1]]
+            else:
+                hits = [p for _, p in by_id]
+        else:
+            hits, recipient_repo = search(primary)
         if not hits:
             hits, recipient_repo = search(alias)
         if len(hits) > 1:
@@ -866,7 +1029,7 @@ def cmd_msg(args) -> int:
                 queue = list(queue) + [inbox_mod.Message(
                     id=f"{_now()}-{os.getpid()}-{len(queue)}",
                     sender=sender or "a peer", recipient=recipient.session_id,
-                    sender_name=me.name if me else "",
+                    sender_name=me.name if me else _reply_address(args.sender_name),
                     body=args.text, created=_now(), subject=args.subject or "",
                     reply=reply)]
                 store.save_inbox(recipient_repo, queue)
@@ -877,6 +1040,10 @@ def cmd_msg(args) -> int:
         if not ring:
             print(f"filed for {recipient.label}; it already has unread mail, so no doorbell "
                   "rung")
+            return 0
+        if getattr(args, "no_ring", False):
+            print(f"filed for {recipient.label}, and not rung: the sender's doorbell budget "
+                  "is spent")
             return 0
         if not recipient.pane:
             # Outside tmux there is no prompt to type a doorbell into. The message is delivered
@@ -915,7 +1082,8 @@ def cmd_msg(args) -> int:
     # addresses can be recycled, so holding mail under either could give it to another process.
     # A successful direct send must not also be filed: that would put the same message in two turns.
     bell = _Doorbell(repo, sender_id, args.target, reply, override)
-    refused = bell.reserve()
+    refused = ("the sender's doorbell budget is spent" if getattr(args, "no_ring", False)
+               else bell.reserve())
     if not refused:
         try:
             pane = tmuxio.send(target, comms.compose(args.text, reply), expect_pid=expect,
@@ -963,7 +1131,8 @@ def cmd_msg(args) -> int:
             queue, _ = store.unexpired_held(queue)
             queue.append(inbox_mod.Message(
                 id=f"held-{uuid.uuid4().hex}", sender=sender or "a peer", recipient=key,
-                sender_name=me.name if me else "", body=args.text, created=_now(),
+                sender_name=me.name if me else _reply_address(args.sender_name), body=args.text,
+                created=_now(),
                 subject=args.subject or "", reply=reply))
             store.save_held(queue)
     except locks.Busy as e:
@@ -1378,6 +1547,13 @@ def build_parser() -> argparse.ArgumentParser:
     repo_arg(b)
     b.add_argument("--quiet", action="store_true", help="say nothing unless there are peers")
     b.add_argument("--json", action="store_true")
+    b.add_argument("--hosts", action="store_true",
+                   help="also ask the boxes in ~/.config/session-coord/hosts, over ssh "
+                        "(at most 5s; never from a hook)")
+    b.add_argument("--all", action="store_true",
+                   help="with --hosts: list every remote session, not just this repo's")
+    b.add_argument("--estate", action="store_true",
+                   help="every live session on this box as JSON; what --hosts reads remotely")
     b.set_defaults(func=cmd_board)
 
     c = sub.add_parser("check", help="findings for this repo; exit 2 blocks, 1 warns")
@@ -1452,6 +1628,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="whether an answer is wanted. Default none, and the body carries a marker saying so -- acknowledgement is not collegial, it is a turn.")
     m.add_argument("--override", default="",
                    help="one line saying what breaks if this waits; rings past the budget and records the reason.")
+    m.add_argument("--no-ring", dest="no_ring", action="store_true",
+                   help=argparse.SUPPRESS)  # file without ringing: set by a remote sender
+    m.add_argument("--sender-name", dest="sender_name", default="",
+                   help=argparse.SUPPRESS)  # the reply address, set by a remote sender
     m.set_defaults(func=cmd_msg)
 
     lk = sub.add_parser("lock", help="run a command under a named per-repo lock")

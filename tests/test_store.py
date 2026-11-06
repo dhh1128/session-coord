@@ -7,6 +7,8 @@ state root answers "who is where across the whole estate" in a single scan.
 
 from __future__ import annotations
 
+import os
+
 import json
 
 import pytest
@@ -124,8 +126,10 @@ class TestKnownRepos:
     def test_lists_every_repo_with_a_registrant(self, home):
         store.save(rec("a", repo="/home/user/code/acme/infra"))
         store.save(rec("b", repo="/home/user/code/me/tools"))
-        assert sorted(store.known_repos()) == ["/home/user/code/acme/infra",
-                                               "/home/user/code/me/tools"]
+        # The marker stores the realpath, and on macOS /home resolves to
+        # /System/Volumes/Data/home, so the expected values go through realpath too.
+        assert sorted(store.known_repos()) == [os.path.realpath("/home/user/code/acme/infra"),
+                                               os.path.realpath("/home/user/code/me/tools")]
 
     def test_nothing_registered_anywhere_is_an_empty_list(self, home):
         assert store.known_repos() == []
