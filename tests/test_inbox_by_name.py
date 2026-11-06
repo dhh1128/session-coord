@@ -384,23 +384,31 @@ def test_a_failed_prune_does_not_block_the_sessions_own_inbox(estate, capsys):
     assert cli.main(["inbox", "--repo", SENDER]) == 0
     out = capsys.readouterr()
     assert "normal mail" in out.out
-    assert "could not prune expired held mail" in out.err
+    assert "held mail could not be updated" in out.err
 
 
-def test_unwritable_held_mail_still_delivers_this_sessions_held_message(estate, capsys):
+def test_unwritable_held_mail_is_left_held_rather_than_delivered_twice(estate, capsys):
     from datetime import datetime, timezone
     fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    store.save_held([_held("old", "2026-10-13T00:00:00+00:00", "someone-gone"),
-                     _held("mine", fresh)])
+    store.save_held([_held("mine", fresh)])
+    store.save_inbox(OTHER, [inbox.Message(id="normal", sender="x", recipient="peer",
+                                           body="normal mail")])
     peer()
     estate.setenv("TMUX_PANE", "%2")
+    real_save = store.save_held
 
     def refuse(messages):
         raise PermissionError("immutable")
 
     estate.setattr(store, "save_held", refuse)
-    for _ in range(2):
-        assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
-        out = capsys.readouterr()
-        assert "body mine" in out.out
-    assert [m.id for m in store.load_inbox(OTHER)] == ["mine"]
+    assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+    out = capsys.readouterr()
+    assert "normal mail" in out.out and "body mine" not in out.out
+    assert "stays held" in out.err
+    assert [m.id for m in store.load_held()] == ["mine"]
+    assert [m.id for m in store.load_inbox(OTHER)] == ["normal"]
+    # Once held mail can be written again, the message is delivered exactly once.
+    estate.setattr(store, "save_held", real_save)
+    assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+    assert "body mine" in capsys.readouterr().out
+    assert store.load_held() == []

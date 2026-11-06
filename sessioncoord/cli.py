@@ -1115,17 +1115,22 @@ def cmd_inbox(args) -> int:
             # Expire under the lock, and write the pruned queue back even when nothing below
             # is delivered: otherwise mail for a name nobody takes is re-read on every turn of
             # every session in the estate, forever.
+            # Held mail is moved only if it can be removed afterwards. A message copied into
+            # this inbox and left in held mail would be delivered again to the next session to
+            # take the name, in any repo (hostile pass on #9). So the pruned queue is written
+            # back here, under the lock, and that write doubles as the check: if it fails,
+            # held mail stays held this turn and only this session's own inbox is read. A
+            # failure here must never stand between a session and its own mail (hostile pass
+            # at edcad05).
+            held_writable = True
             if held:
-                held, expired = store.unexpired_held(held)
-                if expired:
-                    # Cleanup is housekeeping. A failed write must not stand between a
-                    # session and its own mail, so say so and deliver anyway; the next read
-                    # tries again (hostile pass at edcad05, finding 1).
-                    try:
-                        store.save_held(held)
-                    except OSError as e:
-                        print(f"session-coord: could not prune expired held mail: {e}",
-                              file=sys.stderr)
+                held, _ = store.unexpired_held(held)
+                try:
+                    store.save_held(held)
+                except OSError as e:
+                    held_writable = False
+                    print(f"session-coord: held mail could not be updated, so it stays held "
+                          f"until it can be: {e}", file=sys.stderr)
             # Saving the inbox first means a crash between the two writes can repeat a
             # message, but cannot lose it; the next read recognizes its id and finishes
             # removing it from held mail. Moving on peek leaves it unread for the hook's
@@ -1140,7 +1145,7 @@ def cmd_inbox(args) -> int:
             counts = {name: len({(p.session_id, p.claude_pid) for p in live
                                  if name in _held_names(p)})
                       for name in mine_names}
-            selected = [m for m in held if m.recipient in mine_names
+            selected = [m for m in held if held_writable and m.recipient in mine_names
                         and counts[m.recipient] == 1]
             ambiguous = sorted({m.recipient for m in held if m.recipient in mine_names
                                 and counts[m.recipient] > 1})
