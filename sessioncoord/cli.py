@@ -26,7 +26,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from . import asks as asks_mod
-from . import comms, detect, gitio, harvest, locks, procio, remote, store, tmuxio
+from . import comms, detect, gitio, harvest, liveness, locks, procio, remote, store, tmuxio
 from . import inbox as inbox_mod
 from .model import Ask, Board, CONDUCTOR, Presence
 
@@ -1022,7 +1022,10 @@ def cmd_msg(args) -> int:
               f"({sender_rec.session_id}). The doorbell budget is per session, so it is taken "
               "from the pane rather than from an argument. Drop --session.", file=sys.stderr)
         return 2
-    sender_id = sender_rec.session_id if sender_rec else ""
+    # An unregistered Codex under the shared daemon has no record, but it does have a thread
+    # id; charging that keeps it inside the budget (hostile pass on PR #11, finding 3). Before
+    # the daemon fix it was charged to whoever owned the daemon's pane, which was wrong too.
+    sender_id = sender_rec.session_id if sender_rec else _codex_thread()
     override = (getattr(args, "override", "") or "").strip()
 
     # File the body in the recipient's inbox FIRST, then ring. The message is DELIVERED the
@@ -1268,9 +1271,23 @@ def _mine_without_pane(records) -> Presence | None:
     thread = _codex_thread()
     if thread:
         found = next((p for p in records if p.session_id == thread), None)
-        if found is not None:
+        if found is not None and _still_live(found):
             return found
     return _mine_by_pid(records)
+
+
+def _still_live(p: Presence) -> bool:
+    """Is the STORED record for `p` live by the sweep's own rule?
+
+    A thread id names a conversation, not a process. A resumed thread carries the id of a
+    record its former TUI left behind; `_live` has already blanked that record's pane, so it is
+    judged here from disk. Accepting it let a claim succeed against a session the next sweep
+    deletes (hostile pass on PR #11, finding 2).
+    """
+    raw = next((r for r in store.load_all(p.repo_root) if r.session_id == p.session_id), p)
+    pids = [raw.claude_pid] if raw.claude_pid is not None and not raw.pane else []
+    return liveness.is_live(raw, tmuxio.claude_pids(), tmuxio.server_pid(),
+                            procio.starts(pids) if pids else {})
 
 
 def _mine_by_pid(records) -> Presence | None:

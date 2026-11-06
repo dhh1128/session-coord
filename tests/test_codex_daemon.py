@@ -35,6 +35,9 @@ DAEMON = ["/home/u/.codex/packages/app-server-daemon/releases/0.167.0/bin/codex"
     (["/opt/bin/codex", "exec", "one-shot"], False),
     (["/opt/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "reply OK"], False),
     (["/opt/bin/codex", "-C", "app-server"], False),
+    # An option's value is not the subcommand (hostile pass on PR #11, finding 1).
+    (["/opt/bin/codex", "--config", 'model="o3"', "app-server"], True),
+    (["/opt/bin/codex", "-c", "x=1", "app-server", "--listen", "unix://"], True),
     (["claude"], False),
 ])
 def test_codex_server_identity(argv, want):
@@ -140,3 +143,30 @@ def test_register_refuses_a_pid_the_pane_scan_contradicts(world, monkeypatch, ca
     (p,) = store.load_all("/w")
     assert p.claude_pid == 1341719 and p.pane == "%183"
 
+
+
+def test_thread_id_does_not_revive_a_record_its_pane_contradicts(world, monkeypatch):
+    # Hostile pass on PR #11, finding 2: a resumed thread whose old TUI left a record behind.
+    store.save(Presence(session_id="thread-2", repo_root="/w", workdir="/w", pane="%185",
+                        claude_pid=111, engine="codex", title="old"))
+    _under_daemon(monkeypatch)
+    monkeypatch.setenv("CODEX_SESSION_ID", "thread-2")
+    monkeypatch.setattr(cli.tmuxio, "claude_pids", lambda run=None: {"%185": 222})
+    assert cli._me("/w") is None
+    monkeypatch.setattr(cli.tmuxio, "claude_pids", lambda run=None: {"%185": 111})
+    assert cli._me("/w").session_id == "thread-2"
+
+
+def test_an_unregistered_daemon_sender_is_charged_by_thread_id(world, monkeypatch):
+    # Hostile pass on PR #11, finding 3: no record must not mean no budget.
+    _under_daemon(monkeypatch)
+    monkeypatch.setenv("CODEX_SESSION_ID", "thread-9")
+    seen = []
+    real = cli._Doorbell.__init__
+    def spy(self, repo, sender_id, *a, **k):
+        seen.append(sender_id)
+        real(self, repo, sender_id, *a, **k)
+    monkeypatch.setattr(cli._Doorbell, "__init__", spy)
+    monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **k: None)
+    cli.main(["msg", "%7", "hello"])
+    assert seen and set(seen) == {"thread-9"}

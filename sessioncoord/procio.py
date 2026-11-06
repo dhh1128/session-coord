@@ -129,8 +129,17 @@ def is_codex(argv: list[str] | None) -> bool:
 
 def is_codex_headless(argv: list[str] | None) -> bool:
     """One-shot Codex commands do not occupy the pane as peer sessions."""
+    return _codex_subcommand(argv) is not None
+
+
+def _codex_subcommand(argv: list[str] | None) -> str | None:
+    """The non-conversation subcommand a Codex argv runs, such as `exec` or `app-server`.
+
+    None for an interactive TUI, or for anything that is not Codex. Option values are skipped
+    by the same rules Codex's parser uses, so `--config x app-server` names `app-server`.
+    """
     if not is_codex(argv):
-        return False
+        return None
     subcommand = 2 if os.path.basename(argv[0]) == "node" else 1
     args = argv[subcommand:]
     value_options = {"-c", "--config", "--enable", "--disable", "--remote",
@@ -148,7 +157,7 @@ def is_codex_headless(argv: list[str] | None) -> bool:
     while i < len(args):
         arg = args[i]
         if arg == "--":
-            return False
+            return None
         if arg in ("-i", "--image"):
             # This form consumes bare words through the next option, including filenames
             # spelled exec, e, or review.
@@ -172,8 +181,8 @@ def is_codex_headless(argv: list[str] | None) -> bool:
         if arg.startswith("-"):
             i += 1
             continue
-        return arg in headless
-    return False
+        return arg if arg in headless else None
+    return None
 
 
 CODEX_SERVERS = frozenset({"app-server", "exec-server"})
@@ -187,10 +196,7 @@ def is_codex_server(argv: list[str] | None) -> bool:
     started it, it inherited that TUI's environment, and later TUIs attach to its socket. So
     under it, the ancestry, `TMUX_PANE` and `PATH` all describe the FIRST TUI, not the caller.
     """
-    if not is_codex_headless(argv):
-        return False
-    rest = argv[2:] if os.path.basename(argv[0]) == "node" else argv[1:]
-    return next((a for a in rest if not a.startswith("-")), None) in CODEX_SERVERS
+    return _codex_subcommand(argv) in CODEX_SERVERS
 
 
 def nearest_engine(pid: int | None = None) -> tuple[str, int] | None:
