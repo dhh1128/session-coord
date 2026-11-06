@@ -159,3 +159,26 @@ def test_the_board_shows_the_registered_name_beside_the_live_title(world, capsys
     assert cli.main(["board", "--repo", REPO]) == 0
     out = capsys.readouterr().out
     assert "address as: PR1685-attribs brief  (or pr1685-attribs)" in out
+
+
+def test_inbox_session_accepts_a_registered_name_or_an_id_prefix(world, capsys):
+    # 2026-11-06: `inbox --session codex-p2v1` and `--session 01a1b1af` both read nobody's
+    # inbox and printed "Inbox empty" while mail waited.
+    world.setattr(cli.tmuxio, "claude_pids", lambda run=None: {"%2": 2})
+    from sessioncoord.inbox import Message
+    store.save_inbox(REPO, [Message(id="m1", sender="x", recipient="d0e290a3-0000",
+                                    body="for you", created="2026-11-06T00:00:00+00:00")])
+    assert cli.main(["inbox", "--repo", REPO, "--session", "pr1685-attribs", "--peek"]) == 0
+    assert "for you" in capsys.readouterr().out
+    assert cli.main(["inbox", "--repo", REPO, "--session", "d0e290a3", "--peek"]) == 0
+    assert "for you" in capsys.readouterr().out
+
+
+def test_inbox_session_naming_nobody_refuses_and_mentions_held_mail(world, capsys):
+    from sessioncoord.inbox import Message
+    store.save_held([Message(id="held-9", sender="x", recipient="codex-p2v1", body="b",
+                             created="2026-11-06T00:00:00+00:00")])
+    assert cli.main(["inbox", "--repo", REPO, "--session", "codex-p2v1"]) == 2
+    err = capsys.readouterr().err
+    assert "no live session" in err and "1 held message(s)" in err
+    assert [m.id for m in store.load_held()] == ["held-9"]

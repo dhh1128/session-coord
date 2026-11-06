@@ -1432,6 +1432,44 @@ def _held_names(p: Presence) -> set[str]:
                               _held_key(p.session_id)) if name}
 
 
+_SESSION_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                         r"[0-9a-fA-F]{12}$")
+
+
+def _resolve_session_arg(repo: str, given: str) -> tuple[str | None, str]:
+    """Turn `inbox --session` into a session id, or say why it cannot.
+
+    It used to be taken verbatim as the recipient. `--session codex-p2v1` (a name) and
+    `--session 01a1b1af` (an id prefix, what the board prints for an unnamed session) both
+    named nobody and printed "Inbox empty" while mail sat held for that name (2026-11-06). A
+    full session id with no record yet is still accepted: the hook passes its payload's id
+    before the session has registered, and mail can already be waiting under it.
+    """
+    records = store.load_all(repo)
+    if any(p.session_id == given for p in records):
+        return given, ""
+    live = _live(records)
+    by_name = [p for p in live if given in (p.name, p.title, p.registered_name)]
+    by_prefix = [p for p in records if len(given) >= 8 and p.session_id.startswith(given)]
+    found = {p.session_id for p in by_name + by_prefix}
+    if len(found) == 1:
+        return found.pop(), ""
+    if len(found) > 1:
+        return None, (f"'{given}' matches {len(found)} sessions here; pass the full session "
+                      "id (`board --json` lists them).")
+    if _SESSION_ID.match(given):
+        return given, ""
+    try:
+        waiting = sum(1 for m in store.load_held() if m.recipient == given and not m.read)
+    except store.UnreadableQueue:
+        waiting = 0
+    hint = (f" {waiting} held message(s) are waiting for that name; they are delivered when a "
+            "live session registered under it next reads its inbox." if waiting else "")
+    return None, (f"no live session here is called or starts with '{given}', so its inbox "
+                  f"cannot be read.{hint} Register first (`session-coord register --name "
+                  f"...`), then run `inbox` with no --session.")
+
+
 def cmd_inbox(args) -> int:
     """Drain this session's unread messages.
 
@@ -1448,6 +1486,12 @@ def cmd_inbox(args) -> int:
         print("session-coord: cannot tell which session this is; pass --session.",
               file=sys.stderr)
         return 2
+    if args.session:
+        resolved, why = _resolve_session_arg(repo, args.session)
+        if resolved is None:
+            print(f"session-coord: {why}", file=sys.stderr)
+            return 2
+        who = resolved
     try:
         held = store.load_held()
     except store.UnreadableQueue as e:
