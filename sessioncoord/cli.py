@@ -886,6 +886,7 @@ def cmd_msg(args) -> int:
                       "nothing in it was lost, but nobody has read it either.",
                       file=sys.stderr)
                 queue = []
+            queue, _ = store.unexpired_held(queue)
             queue.append(inbox_mod.Message(
                 id=f"held-{uuid.uuid4().hex}", sender=sender or "a peer", recipient=key,
                 sender_name=me.name if me else "", body=args.text, created=_now(),
@@ -894,8 +895,10 @@ def cmd_msg(args) -> int:
     except locks.Busy as e:
         print(f"session-coord: {e}", file=sys.stderr)
         return 75
+    hours = int(store.HELD_TTL.total_seconds() // 3600)
     print(f"held for {args.target}; it will be delivered at the start of the next turn of "
-          f"a session with that name ({refused})")
+          f"a session with that name, if one takes a turn within {hours} hours, and dropped "
+          f"after that ({refused})")
     return 0
 
 
@@ -1109,6 +1112,25 @@ def cmd_inbox(args) -> int:
                 except store.UnreadableQueue as e:
                     print(f"session-coord: {e}; held mail was left unchanged.", file=sys.stderr)
                     held = []
+            # Expire under the lock, and write the pruned queue back even when nothing below
+            # is delivered: otherwise mail for a name nobody takes is re-read on every turn of
+            # every session in the estate, forever.
+            # Held mail is moved only if it can be removed afterwards. A message copied into
+            # this inbox and left in held mail would be delivered again to the next session to
+            # take the name, in any repo (hostile pass on #9). So the pruned queue is written
+            # back here, under the lock, and that write doubles as the check: if it fails,
+            # held mail stays held this turn and only this session's own inbox is read. A
+            # failure here must never stand between a session and its own mail (hostile pass
+            # at edcad05).
+            held_writable = True
+            if held:
+                held, _ = store.unexpired_held(held)
+                try:
+                    store.save_held(held)
+                except OSError as e:
+                    held_writable = False
+                    print(f"session-coord: held mail could not be updated, so it stays held "
+                          f"until it can be: {e}", file=sys.stderr)
             # Saving the inbox first means a crash between the two writes can repeat a
             # message, but cannot lose it; the next read recognizes its id and finishes
             # removing it from held mail. Moving on peek leaves it unread for the hook's
@@ -1123,7 +1145,7 @@ def cmd_inbox(args) -> int:
             counts = {name: len({(p.session_id, p.claude_pid) for p in live
                                  if name in _held_names(p)})
                       for name in mine_names}
-            selected = [m for m in held if m.recipient in mine_names
+            selected = [m for m in held if held_writable and m.recipient in mine_names
                         and counts[m.recipient] == 1]
             ambiguous = sorted({m.recipient for m in held if m.recipient in mine_names
                                 and counts[m.recipient] > 1})
@@ -1144,7 +1166,29 @@ def cmd_inbox(args) -> int:
                         queue = list(queue) + moved
                         store.save_inbox(repo, queue)
                     moved_ids = {m.id for m in selected}
-                    store.save_held([m for m in held if m.id not in moved_ids])
+                    # A held message must end up in exactly one place. If it cannot be removed
+                    # from held mail, take back what this read just added to the inbox, so it
+                    # stays held and is not delivered to this session now and to the next
+                    # namesake later (hostile passes on #9). Raising here would withhold this
+                    # session's own mail, so the failure is reported instead (hostile pass at
+                    # 80c2779).
+                    try:
+                        store.save_held([m for m in held if m.id not in moved_ids])
+                    except OSError as e:
+                        # Every selected id, not only those this read added: a copy left by
+                        # an earlier read whose restore failed is just as much in two places.
+                        present = {m.id for m in queue} & moved_ids
+                        queue = [m for m in queue if m.id not in moved_ids]
+                        try:
+                            if present:
+                                store.save_inbox(repo, queue)
+                            print(f"session-coord: held mail could not be updated, so it stays "
+                                  f"held until it can be: {e}", file=sys.stderr)
+                        except OSError as e2:
+                            print(f"session-coord: held mail could not be updated ({e}), and "
+                                  f"the inbox could not be restored ({e2}); a held message may "
+                                  "reach a later session with the same name as well",
+                                  file=sys.stderr)
                 mine = inbox_mod.unread(queue, who)
                 # `--ack` acknowledges exactly the messages that were delivered, by id, rather
                 # than "whatever is unread now". The delivery hook reads without clearing, writes

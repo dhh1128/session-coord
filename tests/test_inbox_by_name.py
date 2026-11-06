@@ -320,3 +320,147 @@ def test_a_crlf_stdin_body_is_delivered_with_plain_newlines(estate, monkeypatch)
     monkeypatch.setattr("sys.stdin", _Stdin(b"hello\r\nworld\r\n"))
     assert cli.main(["msg", "--repo", SENDER, "keripy-tls-pin", "-"]) == 0
     assert [m.body for m in store.load_held()] == ["hello\nworld"]
+
+
+# ----- held mail expires after 72 hours (2026-11-05) -------------------------------------
+
+def _held(mid, created, recipient="foreman-imbu"):
+    return inbox.Message(id=mid, sender="a peer", recipient=recipient, body=f"body {mid}",
+                         created=created)
+
+
+def test_unexpired_held_keeps_fresh_and_drops_stale_and_unreadable():
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 11, 5, 12, tzinfo=timezone.utc)
+    iso = lambda d: d.isoformat(timespec="seconds")
+    msgs = [
+        _held("fresh", iso(now - timedelta(hours=71))),
+        _held("edge", iso(now - store.HELD_TTL)),
+        _held("stale", iso(now - timedelta(hours=73))),
+        _held("empty", ""),
+        _held("garbage", "last tuesday"),
+        _held("naive", "2026-11-05T11:00:00"),
+        _held("future", iso(now + timedelta(days=30))),
+        _held("skewed", iso(now + timedelta(minutes=10))),
+    ]
+    kept, expired = store.unexpired_held(msgs, now)
+    assert [m.id for m in kept] == ["fresh", "edge", "skewed"]
+    assert [m.id for m in expired] == ["stale", "empty", "garbage", "naive", "future"]
+
+
+def test_a_new_hold_prunes_expired_mail_and_states_the_deadline(estate, capsys):
+    hold_budget(estate)
+    store.save_held([_held("old", "2026-10-13T00:00:00+00:00", "someone-gone")])
+    assert cli.main(["msg", "--repo", SENDER, "Foreman-Imbu", "new body"]) == 0
+    assert "within 72 hours" in capsys.readouterr().out
+    assert [m.body for m in store.load_held()] == ["new body"]
+
+
+def test_reading_an_inbox_prunes_expired_held_mail_it_does_not_deliver(estate, capsys):
+    store.save_held([_held("old", "2026-10-13T00:00:00+00:00", "someone-gone"),
+                     _held("bad", "", "someone-gone")])
+    assert cli.main(["inbox", "--repo", SENDER]) == 0
+    assert store.load_held() == []
+
+
+def test_expired_held_mail_is_never_delivered_to_its_name(estate, capsys):
+    store.save_held([_held("old", "2026-10-13T00:00:00+00:00")])
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "body old" not in capsys.readouterr().out
+    assert store.load_inbox(OTHER) == [] and store.load_held() == []
+
+
+def test_a_failed_prune_does_not_block_the_sessions_own_inbox(estate, capsys):
+    store.save_held([_held("old", "2026-10-13T00:00:00+00:00", "someone-gone")])
+    store.save_inbox(SENDER, [inbox.Message(id="normal", sender="peer",
+                                            recipient="sender", body="normal mail")])
+
+    def refuse(messages):
+        raise PermissionError("read-only state")
+
+    estate.setattr(store, "save_held", refuse)
+    assert cli.main(["inbox", "--repo", SENDER]) == 0
+    out = capsys.readouterr()
+    assert "normal mail" in out.out
+    assert "held mail could not be updated" in out.err
+
+
+def test_unwritable_held_mail_is_left_held_rather_than_delivered_twice(estate, capsys):
+    from datetime import datetime, timezone
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    store.save_held([_held("mine", fresh)])
+    store.save_inbox(OTHER, [inbox.Message(id="normal", sender="x", recipient="peer",
+                                           body="normal mail")])
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+    real_save = store.save_held
+
+    def refuse(messages):
+        raise PermissionError("immutable")
+
+    estate.setattr(store, "save_held", refuse)
+    assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+    out = capsys.readouterr()
+    assert "normal mail" in out.out and "body mine" not in out.out
+    assert "stays held" in out.err
+    assert [m.id for m in store.load_held()] == ["mine"]
+    assert [m.id for m in store.load_inbox(OTHER)] == ["normal"]
+    # Once held mail can be written again, the message is delivered exactly once.
+    estate.setattr(store, "save_held", real_save)
+    assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+    assert "body mine" in capsys.readouterr().out
+    assert store.load_held() == []
+
+
+def test_a_removal_that_fails_after_the_check_takes_the_message_back(estate, capsys):
+    from datetime import datetime, timezone
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    store.save_held([_held("mine", fresh)])
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+    real_save = store.save_held
+    calls = []
+
+    def first_ok_then_refuse(messages):
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("disk went away")
+        return real_save(messages)
+
+    estate.setattr(store, "save_held", first_ok_then_refuse)
+    assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+    out = capsys.readouterr()
+    assert "body mine" not in out.out and "stays held" in out.err
+    assert [m.id for m in store.load_held()] == ["mine"]
+    assert store.load_inbox(OTHER) == []
+
+
+def test_a_copy_left_by_a_failed_restore_is_taken_back_on_the_next_read(estate, capsys):
+    from datetime import datetime, timezone
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    store.save_held([_held("mine", fresh)])
+    # What an earlier read leaves when both its removal and its restore failed.
+    store.save_inbox(OTHER, [replace_recipient(_held("mine", fresh), "peer")])
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+    real_save = store.save_held
+    calls = []
+
+    def first_ok_then_refuse(messages):
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("still failing")
+        return real_save(messages)
+
+    estate.setattr(store, "save_held", first_ok_then_refuse)
+    assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+    assert "body mine" not in capsys.readouterr().out
+    assert store.load_inbox(OTHER) == []
+    assert [m.id for m in store.load_held()] == ["mine"]
+
+
+def replace_recipient(m, who):
+    from dataclasses import replace
+    return replace(m, recipient=who)
