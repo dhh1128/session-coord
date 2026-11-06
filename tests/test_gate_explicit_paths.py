@@ -170,12 +170,22 @@ SHARED = {"code": "shared-tree", "severity": "block", "summary": "2 sessions",
           "sessions": ["peer", "me"], "workdirs": []}
 
 
-def run_gate(monkeypatch, capsys, command, cwd, findings, staged=()):
+def run_gate(monkeypatch, capsys, command, cwd, findings, staged=(), claims=None):
     asked = []
 
-    def fake_ask(tree, cwd_, paths=(), session=""):
+    def fake_ask(tree, cwd_, paths=(), session="", require_claim=False):
         asked.append((tree, tuple(paths), session))
         out = []
+        if require_claim and paths:
+            missing = [p for p in paths if p not in (claims or ())]
+            if missing:
+                out.append({"code": "unclaimed-path", "severity": "block",
+                            "summary": "unclaimed", "detail": " ".join(missing),
+                            "remedy": "session-coord claim -- " + " ".join(missing),
+                            "sessions": [], "workdirs": [cwd]})
+                if claims is None:
+                    out.append({"code": "unoriented", "severity": "note", "summary": "",
+                                "detail": "", "remedy": "", "sessions": [], "workdirs": [cwd]})
         for f in findings:
             f = dict(f)
             if f["code"] == "shared-tree":
@@ -249,8 +259,61 @@ class TestTheGateEndToEnd:
                      remedy="This repo shares its main checkout on purpose: name the files.")
         denied, _ = run_gate(monkeypatch, capsys, "git add -A", tree, [opted])
         assert denied and "git worktree add" not in denied
-        denied, _ = run_gate(monkeypatch, capsys, INCIDENT_1, tree, [opted])
+        denied, _ = run_gate(monkeypatch, capsys, INCIDENT_1, tree, [opted],
+                             claims=("products.md", "components.md"))
         assert denied is None
+
+
+class TestAMarkedRepoRequiresClaims:
+    """2026-11-05, R-AS3C. Where sessions share the checkout on purpose, an explicit path is
+    not enough: two sessions can have edited the same file, and an explicit commit of it
+    carries both. The committing session must claim what it commits."""
+
+    OPTED = dict(SHARED, severity="warn", remedy="This repo shares its main checkout.")
+
+    def test_an_unclaimed_file_is_refused_with_the_claim_line(self, tree, monkeypatch, capsys):
+        denied, asked = run_gate(monkeypatch, capsys, INCIDENT_1, tree, [self.OPTED],
+                                 claims=("products.md",))
+        assert denied and "has not claimed components.md" in denied
+        assert "session-coord claim -- components.md" in denied
+        assert "the same commit again, unchanged" in denied
+        assert "skill was not loaded" not in denied
+        assert asked[-1][2] == "me-id"
+
+    def test_a_session_with_no_claims_is_told_to_load_the_skill(self, tree, monkeypatch, capsys):
+        denied, _ = run_gate(monkeypatch, capsys, INCIDENT_1, tree, [self.OPTED])
+        assert denied and "skill was not loaded" in denied
+
+    def test_claimed_files_pass(self, tree, monkeypatch, capsys):
+        denied, _ = run_gate(monkeypatch, capsys, "git commit -s -m x -- a.md", tree,
+                             [self.OPTED], claims=("a.md",))
+        assert denied is None
+
+    def test_an_unmarked_repo_does_not_require_claims(self, tree, monkeypatch, capsys):
+        denied, _ = run_gate(monkeypatch, capsys, "git commit -s -m x -- a.md", tree, [SHARED])
+        assert denied is None
+
+    def test_the_peer_claim_refusal_says_how_to_hand_off(self, tree, monkeypatch, capsys):
+        claimed = {"code": "claimed-path", "severity": "block", "summary": "",
+                   "detail": "a.md (claim: a.md)", "remedy": "", "sessions": ["peer"],
+                   "workdirs": [tree]}
+        denied, _ = run_gate(monkeypatch, capsys, "git add a.md", tree, [SHARED, claimed])
+        assert denied and "session-coord msg" in denied and "hand-off" in denied
+
+
+class TestTheUnnamedTreeRefusalSaysWhatHidIt:
+    """2026-11-05: two refusals in a row, each saying only that the tree could not be named."""
+
+    def test_a_multi_line_message_after_cd_is_named_as_the_cause(self, tree, monkeypatch,
+                                                                 capsys):
+        cmd = 'cd /elsewhere && git add a.md && git commit -s -m "one\n\ntwo" -- a.md'
+        denied, _ = run_gate(monkeypatch, capsys, cmd, tree, [SHARED])
+        assert denied and "spans several lines" in denied and "-F <msgfile>" in denied
+        assert f"git -C {tree} add -- <file>" in denied
+
+    def test_a_variable_is_named_as_the_cause(self, tree, monkeypatch, capsys):
+        denied, _ = run_gate(monkeypatch, capsys, "git -C $W add a.md", tree, [SHARED])
+        assert denied and "shell variable" in denied
 
 
 class TestStagedPathsReadsTheRealIndex:

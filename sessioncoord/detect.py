@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import fnmatch
 import posixpath
+import re
+import shlex
 from collections import defaultdict
 from typing import Iterable, Sequence
 
@@ -149,11 +151,13 @@ def _shared_checkout(workdir: str, group: Sequence[Presence]) -> Finding:
         ),
         sessions=_labels(group),
         workdirs=(workdir,),
-        remedy=EXPLICIT_REMEDY,
+        remedy=("Claim each file before you commit it: `session-coord claim -- <file> "
+                "<file>`. Here the gate refuses a commit of any file this session has not "
+                "claimed. " + EXPLICIT_REMEDY),
     )
 
 
-def _claim_relative(claim: str, workdir: str) -> str | None:
+def _claim_relative(claim: str, workdir: str, strip: bool = True) -> str | None:
     """A claim as a path relative to `workdir`, or None when it governs somewhere else.
 
     Claims are usually repo-relative (`docs/**`), but sessions also claim absolute paths, and
@@ -161,11 +165,16 @@ def _claim_relative(claim: str, workdir: str) -> str | None:
     """
     # Normalised lexically first: `/repo/../repo/docs/**` and `./docs/*.md` are ordinary
     # spellings of claims, and the gate normalises the paths it asks about (Copilot on PR #5).
-    c = posixpath.normpath(claim.strip())
+    # `strip` is for the peer side, where erring toward a match is safe; ownership passes
+    # False, because `notes.md ` is a different file from `notes.md`.
+    c = posixpath.normpath(claim.strip() if strip else claim)
     if not posixpath.isabs(c):
         return c
     root = posixpath.normpath(workdir)
-    if c.rstrip("/") == root or c.rstrip("/*") == root:
+    # The ownership side (strip=False) reads `/repo/*` as `*`, one root segment, through the
+    # prefix branch below. Collapsing it to `**` is safe only where a match refuses (Copilot
+    # on #10).
+    if c.rstrip("/") == root or (strip and c.rstrip("/*") == root):
         return "**"
     if c.startswith(root + "/"):
         return c[len(root) + 1:]
@@ -221,6 +230,123 @@ def claimed_paths(board: Board, workdir: str, session_id: str,
                 remedy=f"Leave {path} to {s.label}, or agree a hand-off with it first.",
             ))
             break
+    return out
+
+
+def _glob_regex(pattern: str) -> str:
+    """A claim glob as a regex where `*` and `?` stay inside one path segment and `**` spans
+    segments -- what a session means by `docs/*.md` or `drafts/**`."""
+    out, i = [], 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+            continue
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        if ch == "*":
+            out.append("[^/]*")
+        elif ch == "?":
+            out.append("[^/]")
+        elif ch == "[":
+            j = pattern.find("]", i + 1)
+            if j == -1:
+                out.append(re.escape(ch))
+            else:
+                body = pattern[i + 1:j].replace("\\", "\\\\")
+                out.append("[" + ("^" + body[1:] if body.startswith("!") else body) + "]")
+                i = j
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    return "".join(out)
+
+
+def _claim_owns(claim: str, path: str) -> bool:
+    """True only when `claim` names `path` itself, a directory above it, or a glob matching it.
+
+    Deliberately NOT `_claim_covers`. That one errs toward True, which is the safe direction
+    when a peer's claim REFUSES a commit. Here a claim AUTHORISES one, so the same leniency
+    is a fail-open: it accepted `README.md` for `readme.md`, `notes.md ` for `notes.md`, and
+    `docs/owned.md` for `docs` (hostile pass on #10, finding 1). Exact, case-sensitive, no
+    trimming; a refusal on a case-insensitive filesystem is the safe error.
+    """
+    if claim in (".", "**"):
+        # The repo root: `claim -- .` or an absolute claim of the tree itself (Copilot on #10).
+        return True
+    if any(ch in claim for ch in "*?["):
+        try:
+            return re.fullmatch(_glob_regex(claim.rstrip("/")), path) is not None
+        except re.error:
+            # A malformed glob such as `[]` owns nothing. Raising would turn one bad claim
+            # into a board the gate cannot ask, refusing every commit (Copilot on #10).
+            return False
+    c = claim.rstrip("/")
+    return path == c or path.startswith(c + "/")
+
+
+def unclaimed_paths(board: Board, workdir: str, session_id: str,
+                    paths: Iterable[str]) -> list[Finding]:
+    """Findings for the named paths the asking session has NOT claimed, in a repo that shares
+    its checkout on purpose.
+
+    2026-11-05, Daniel's call (R-AS3C): where sessions share a checkout by design, an explicit
+    path is not enough. Two sessions editing the same file each see it dirty, and an explicit
+    `git commit -- that.md` carries both sets of edits under one session's message. Nothing
+    records who dirtied a file, so a claim is the only evidence the gate can ask for. Requiring
+    it turns a silent overlap into a declaration both sessions can see.
+
+    One finding, listing every unclaimed path, so the refusal can hand back a single claim
+    line. A caller that cannot say who it is, or has no record in this tree, gets the same
+    finding for every path: excusing a path needs knowing whose claim it is.
+    """
+    here = workdir.rstrip("/")
+    me = next((s for s in board.sessions
+               if session_id and s.session_id == session_id and s.workdir.rstrip("/") == here),
+              None)
+    # A blank claim is no claim. normpath turns "" into ".", which owns the whole tree, so an
+    # unset shell variable in `claim -- "$F"` would have authorised every file (hostile pass
+    # at ff11154).
+    own = tuple(c for c in (me.claims if me else ()) if c.strip())
+    missing = [p for p in paths
+               if not any((rel := _claim_relative(c, here, strip=False)) is not None
+                          and _claim_owns(rel, p)
+                          for c in own)]
+    if not missing:
+        return []
+    # The remedy names the tree. A session committing into another repo with `git -C` would
+    # otherwise claim the file in the repo it happens to sit in, be told it succeeded, and be
+    # refused again (hostile pass on #10, finding 2). With no record in that tree, it has to
+    # register there first, and the gate knows its session id.
+    files = " ".join(shlex.quote(p) for p in missing)
+    tree = shlex.quote(here)
+    if me is not None:
+        remedy = f"session-coord claim --repo {tree} -- {files}"
+    else:
+        sid = f" --session {shlex.quote(session_id)}" if session_id else ""
+        remedy = (f"session-coord register --repo {tree} --cwd {tree}{sid} "
+                  + " ".join(f"--claim {shlex.quote(p)}" for p in missing))
+    out = [Finding(
+        code="unclaimed-path",
+        severity="block",
+        summary=f"{len(missing)} path(s) this session has not claimed",
+        detail=" ".join(missing),
+        workdirs=(here,),
+        remedy=remedy,
+    )]
+    if me is None or (not me.charter and not me.claims):
+        out.append(Finding(
+            code="unoriented",
+            severity="note",
+            summary="this session has registered no charter and no claims",
+            detail=("" if me else "no record for this session in this tree"),
+            workdirs=(here,),
+            remedy=("Load the session-coord skill and follow 'Say who you are, what you are "
+                    "for, and what you will write'."),
+        ))
     return out
 
 
