@@ -163,3 +163,16 @@ class TestCopilotOnTen:
     def test_a_root_claim_owns_every_file(self, claim):
         board = Board.of(TREE, [rec(claims=(claim,), charter="x")])
         assert detect.unclaimed_paths(board, TREE, "me", ["a.md", "sub/b.md"]) == []
+
+
+class TestABlankClaimIsNoClaim:
+    @pytest.mark.parametrize("claim", ["", " ", "\t"])
+    def test_a_stored_blank_claim_owns_nothing(self, claim):
+        board = Board.of(TREE, [rec(claims=(claim,), charter="x")])
+        assert codes(detect.unclaimed_paths(board, TREE, "me", ["top.md"])) == ["unclaimed-path"]
+
+    def test_the_claim_command_refuses_a_blank_path(self, estate, capsys):
+        store.save(rec(claims=("a.md",)))
+        assert cli.main(["claim", "--repo", TREE, "--", ""]) == 2
+        assert "empty path" in capsys.readouterr().err
+        assert store.load_all(TREE)[0].claims == ("a.md",)

@@ -350,6 +350,11 @@ def cmd_claim(args) -> int:
     about to write one more file": a session following a refusal's advice would silently drop
     every claim it already held. This appends, de-duplicated, under the presence lock.
     """
+    blank = [c for c in args.paths if not c.strip()]
+    if blank:
+        print("session-coord: refusing an empty path. A blank claim usually means an unset "
+              "shell variable; name the files literally. Nothing was claimed.", file=sys.stderr)
+        return 2
     repo = _resolve_repo(args)
     if repo is None:
         print("session-coord: not a git repo; nothing claimed.", file=sys.stderr)

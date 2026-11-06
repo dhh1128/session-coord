@@ -307,7 +307,10 @@ def unclaimed_paths(board: Board, workdir: str, session_id: str,
     me = next((s for s in board.sessions
                if session_id and s.session_id == session_id and s.workdir.rstrip("/") == here),
               None)
-    own = me.claims if me else ()
+    # A blank claim is no claim. normpath turns "" into ".", which owns the whole tree, so an
+    # unset shell variable in `claim -- "$F"` would have authorised every file (hostile pass
+    # at ff11154).
+    own = tuple(c for c in (me.claims if me else ()) if c.strip())
     missing = [p for p in paths
                if not any((rel := _claim_relative(c, here, strip=False)) is not None
                           and _claim_owns(rel, p)
