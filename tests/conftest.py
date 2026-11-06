@@ -32,3 +32,9 @@ def _no_live_tmux(monkeypatch):
     """
     from sessioncoord import cli
     monkeypatch.setattr(cli, "_live_table", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_hosts(monkeypatch, tmp_path):
+    """`msg` reads the hosts file on every send, so the box's real one must not leak in."""
+    monkeypatch.setenv("SESSION_COORD_HOSTS", str(tmp_path / "no-hosts"))

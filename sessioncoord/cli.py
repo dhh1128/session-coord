@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -25,7 +26,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from . import asks as asks_mod
-from . import comms, detect, gitio, harvest, locks, procio, store, tmuxio
+from . import comms, detect, gitio, harvest, locks, procio, remote, store, tmuxio
 from . import inbox as inbox_mod
 from .model import Ask, Board, CONDUCTOR, Presence
 
@@ -340,7 +341,41 @@ def _register_locked(args, repo: str) -> int:
     return 0
 
 
+def _estate_view() -> dict:
+    """Every live session on this box, in the shape a peer box reads over ssh.
+
+    Read-only: no sweep, since a peer asking must not mutate this box's records, and a
+    stale record costs one extra line on someone else's board.
+    """
+    table = _live_table()
+    out = []
+    for repo in store.known_repos():
+        origin = remote.origin_of(repo)
+        for p in _live(store.load_all(repo), table):
+            out.append({"name": p.name, "label": p.label, "repo_root": p.repo_root,
+                        "workdir": p.workdir, "branch": p.branch, "charter": p.charter,
+                        "claims": list(p.claims), "role": p.role, "origin": origin,
+                        "engine": p.engine})
+    # Worktrees too, because a session's registration and its work can be in different
+    # repos. On 2026-11-06 a kelun session registered in devenv was working in
+    # session-coord/.worktrees/codex-appserver, so a board matched on origin missed it; what
+    # found it was listing that repo's worktrees by hand.
+    trees = []
+    for repo in store.known_repos():
+        origin = remote.origin_of(repo)
+        for path, branch in gitio.worktrees(repo):
+            if os.path.realpath(path) != os.path.realpath(repo):
+                trees.append({"repo_root": repo, "origin": origin, "path": path,
+                              "branch": branch})
+    return {"host": remote.local_host(), "sessions": out, "worktrees": trees}
+
+
 def cmd_board(args) -> int:
+    if getattr(args, "estate", False):
+        # What a peer box fetches. The only output is the JSON, so a remote parse never has
+        # to step around a warning.
+        print(json.dumps(_estate_view()))
+        return 0
     repo = _resolve_repo(args)
     if repo is None:
         print("session-coord: not a git repo.", file=sys.stderr)
@@ -349,9 +384,18 @@ def cmd_board(args) -> int:
     if args.json:
         print(json.dumps([json.loads(s.to_json()) for s in board.sessions], indent=2))
         return 0
-    if args.quiet and len(board.sessions) < 2:
+    hosts = remote.load_hosts() if getattr(args, "hosts", False) else []
+    if args.quiet and len(board.sessions) < 2 and not hosts:
         return 0
     sys.stdout.write(_render_board(board))
+    if getattr(args, "hosts", False):
+        if not hosts:
+            print(f"on other boxes: none configured (list them, one per line, in "
+                  f"{remote.hosts_path()})")
+            return 0
+        views, note = remote.fetch(hosts)
+        sys.stdout.write(remote.render(views, remote.origin_of(repo), note,
+                                       show_all=getattr(args, "all", False)))
     return 0
 
 
@@ -692,6 +736,49 @@ class _Doorbell:
 MSG_STDIN_LIMIT = 256 * 1024
 
 
+def _msg_remote(args, name: str, host) -> int:
+    """`msg name@host`: hand the message to session-coord on that box, body on stdin.
+
+    The remote side files and rings exactly as a local send would, so held mail, the inbox
+    and the doorbell all behave the same; only the sender label says where it came from.
+    """
+    # The NAME, not the label: the label carries "(now me:2)", and the recipient answers by
+    # pasting what it was given, so the sender line has to be an address that works from there.
+    me = _me_anywhere(_resolve_repo(args))
+    sender = args.sender or (me.name if me else "a peer")
+    argv = ["msg", name, "-", "--sender", f"{sender}@{remote.local_host()}",
+            "--reply", getattr(args, "reply", comms.REPLY_NONE)]
+    if args.subject:
+        argv += ["--subject", args.subject]
+    if getattr(args, "override", ""):
+        argv += ["--override", args.override]
+    blocked = remote.sandboxed()
+    if blocked:
+        print(f"session-coord: nothing sent to {name}@{host.name}: {blocked}.", file=sys.stderr)
+        return 2
+    body = args.text.encode("utf-8")
+    try:
+        proc = remote._spawn(remote.remote_argv(host, *argv), stdin=body)
+        out, err = proc.communicate(body, timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        print(f"session-coord: {host.name} did not answer within 20s; the message may or may "
+              "not have been filed there.", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"session-coord: could not start ssh to {host.name} ({e}); nothing sent.",
+              file=sys.stderr)
+        return 2
+    sys.stdout.write(out.decode("utf-8", "replace"))
+    text = err.decode("utf-8", "replace")
+    if proc.returncode == 255:
+        text = (f"session-coord: ssh to {host.name} failed, so nothing was sent. "
+                f"{text.strip()}\n")
+    sys.stderr.write(text)
+    return proc.returncode
+
+
 def cmd_msg(args) -> int:
     # `-` reads the body from stdin, as `zamu tell` does, so prose a command guard would
     # inspect need not appear in the command line. Before this, `msg <peer> - < file` sent a
@@ -715,6 +802,11 @@ def cmd_msg(args) -> int:
             print("session-coord: the body was `-` but stdin was empty; nothing sent.",
                   file=sys.stderr)
             return 2
+    # `name@host` goes to that box, but only when `host` is in the hosts file: an `@` in an
+    # ordinary pane title must keep meaning a local session.
+    routed = remote.split_address(args.target, remote.load_hosts())
+    if routed:
+        return _msg_remote(args, *routed)
     # Look the target up on the board and pass its recorded pid. `send` documents expect_pid as
     # the guard against pane-id reuse, and the CLI was not using its own guard -- so a window
     # reassigned between the two resolutions would have been typed into as though it were the
@@ -1378,6 +1470,13 @@ def build_parser() -> argparse.ArgumentParser:
     repo_arg(b)
     b.add_argument("--quiet", action="store_true", help="say nothing unless there are peers")
     b.add_argument("--json", action="store_true")
+    b.add_argument("--hosts", action="store_true",
+                   help="also ask the boxes in ~/.config/session-coord/hosts, over ssh "
+                        "(at most 5s; never from a hook)")
+    b.add_argument("--all", action="store_true",
+                   help="with --hosts: list every remote session, not just this repo's")
+    b.add_argument("--estate", action="store_true",
+                   help="every live session on this box as JSON; what --hosts reads remotely")
     b.set_defaults(func=cmd_board)
 
     c = sub.add_parser("check", help="findings for this repo; exit 2 blocks, 1 warns")
