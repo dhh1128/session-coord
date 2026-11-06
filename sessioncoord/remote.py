@@ -253,12 +253,23 @@ def _clean(d: dict, fields: tuple[str, ...]) -> dict:
     A peer's answer is input like any other: one malformed field must cost that field, not
     the board, and must not be cached in a shape the renderer cannot handle.
     """
-    out = {k: d[k] if isinstance(d.get(k), str) else "" for k in fields}
+    out = {k: _text(d[k]) if isinstance(d.get(k), str) else "" for k in fields}
     if "claims" in d or fields is _SESSION_FIELDS:
         claims = d.get("claims")
-        out["claims"] = ([c for c in claims if isinstance(c, str)]
+        out["claims"] = ([_text(c) for c in claims[:MAX_CLAIMS] if isinstance(c, str)]
                          if isinstance(claims, list) else [])
     return out
+
+
+MAX_FIELD = 2000
+MAX_CLAIMS = 100
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _text(value: str) -> str:
+    """A peer's string, safe to print: control characters (which include the escape that
+    starts a terminal sequence) become spaces, and length is capped."""
+    return _CONTROL.sub(" ", value[:MAX_FIELD])
 
 
 def _why(code: int | None, err: bytes) -> str:
@@ -269,6 +280,44 @@ def _why(code: int | None, err: bytes) -> str:
     if "unrecognized arguments" in tail or "invalid choice" in tail:
         return "its session-coord is too old to answer (update the plugin there)"
     return f"exit {code}: {tail}" if tail else f"exit {code}"
+
+
+#: A box's whole answer. Daniel's estate is a few KB; a peer that sends more than this is
+#: broken, and reading it all would let it take this box's memory and cache disk.
+MAX_ANSWER = 2 * 1024 * 1024
+
+
+def _bounded(proc, end: float):
+    """(stdout, stderr) read with a size cap, or None for no answer by `end` or too much.
+
+    stderr is drained on its own thread, keeping only its first 64 KB, so a peer that writes
+    a lot of it cannot stall the stdout read on a full pipe.
+    """
+    err: list[bytes] = []
+
+    def drain():
+        kept = b""
+        try:
+            for chunk in iter(lambda: proc.stderr.read(65536), b""):
+                if len(kept) < 65536:
+                    kept += chunk[:65536 - len(kept)]
+        except (OSError, ValueError):
+            pass
+        err.append(kept)
+    t = threading.Thread(target=drain, daemon=True)
+    t.start()
+    try:
+        out = proc.stdout.read(MAX_ANSWER + 1)
+    except (OSError, ValueError):
+        return None
+    if len(out) > MAX_ANSWER:
+        return None
+    try:
+        proc.wait(timeout=max(0.0, end - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return None
+    t.join(1.0)
+    return out, (err[0] if err else b"")
 
 
 def fetch(hosts: list[Host], deadline: float = DEADLINE, net=None) -> tuple[list[HostView], str]:
@@ -309,10 +358,7 @@ def fetch(hosts: list[Host], deadline: float = DEADLINE, net=None) -> tuple[list
     answers: dict[str, tuple[bytes, bytes] | None] = {}
 
     def read(name, proc):
-        try:
-            answers[name] = proc.communicate(timeout=max(0.0, end - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            answers[name] = None
+        answers[name] = _bounded(proc, end)
     threads = [threading.Thread(target=read, args=item, daemon=True) for item in live.items()]
     for t in threads:
         t.start()

@@ -770,6 +770,19 @@ def _msg_remote(args, name: str, host) -> int:
     if blocked:
         print(f"session-coord: nothing sent to {name}@{host.name}: {blocked}.", file=sys.stderr)
         return 2
+    # The doorbell budget is charged HERE, where the sender is known. Over ssh the far box sees
+    # only a display string and cannot attribute the send, so it would exempt every remote
+    # message from the limit (hostile pass on PR #12). Over budget, the message is still filed
+    # there, just not rung, which is the same rule as a local send.
+    sender_id = me.session_id if me else ""
+    bell = _Doorbell(_resolve_repo(args), sender_id, f"{name}@{host.name}",
+                     getattr(args, "reply", comms.REPLY_NONE),
+                     (getattr(args, "override", "") or "").strip())
+    refused = bell.reserve()
+    if refused:
+        argv += ["--no-ring"]
+        print(f"session-coord: filing for {name}@{host.name} without ringing: {refused}",
+              file=sys.stderr)
     body = args.text.encode("utf-8")
     try:
         proc = remote._spawn(remote.remote_argv(host, *argv), stdin=body)
@@ -1005,6 +1018,10 @@ def cmd_msg(args) -> int:
             print(f"filed for {recipient.label}; it already has unread mail, so no doorbell "
                   "rung")
             return 0
+        if getattr(args, "no_ring", False):
+            print(f"filed for {recipient.label}, and not rung: the sender's doorbell budget "
+                  "is spent")
+            return 0
         if not recipient.pane:
             # Outside tmux there is no prompt to type a doorbell into. The message is delivered
             # all the same: the UserPromptSubmit hook reads the inbox at the start of the
@@ -1042,7 +1059,8 @@ def cmd_msg(args) -> int:
     # addresses can be recycled, so holding mail under either could give it to another process.
     # A successful direct send must not also be filed: that would put the same message in two turns.
     bell = _Doorbell(repo, sender_id, args.target, reply, override)
-    refused = bell.reserve()
+    refused = ("the sender's doorbell budget is spent" if getattr(args, "no_ring", False)
+               else bell.reserve())
     if not refused:
         try:
             pane = tmuxio.send(target, comms.compose(args.text, reply), expect_pid=expect,
@@ -1586,6 +1604,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="whether an answer is wanted. Default none, and the body carries a marker saying so -- acknowledgement is not collegial, it is a turn.")
     m.add_argument("--override", default="",
                    help="one line saying what breaks if this waits; rings past the budget and records the reason.")
+    m.add_argument("--no-ring", dest="no_ring", action="store_true",
+                   help=argparse.SUPPRESS)  # file without ringing: set by a remote sender
     m.set_defaults(func=cmd_msg)
 
     lk = sub.add_parser("lock", help="run a command under a named per-repo lock")

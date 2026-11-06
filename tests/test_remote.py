@@ -17,6 +17,12 @@ class FakeProc:
         self.out, self.err, self.returncode, self.hang = out, err, code, hang
         self.killed = False
         self.sent = None
+        self.stdout, self.stderr = io.BytesIO(out), io.BytesIO(err)
+
+    def wait(self, timeout=None):
+        if self.hang and not self.killed:
+            raise subprocess.TimeoutExpired("ssh", timeout)
+        return self.returncode
 
     def communicate(self, input=None, timeout=None):
         if self.hang and not self.killed:
@@ -309,3 +315,52 @@ def test_gitio_worktrees_reads_porcelain():
                  "worktree /r/.worktrees/d\nHEAD 123\ndetached\n")
     assert gitio.worktrees("/r", lambda argv, cwd: porcelain) == [
         ("/r", "main"), ("/r/.worktrees/x", "x"), ("/r/.worktrees/d", "")]
+
+
+
+class TestPeerAnswersAreBounded:
+    """Hostile pass on PR #12: a peer's answer is input, and the terminal is an output."""
+
+    def test_an_oversized_answer_is_refused_not_read_whole(self, home, monkeypatch):
+        import sys
+        big = [sys.executable, "-c",
+               "import sys; sys.stdout.write('x' * (3 * 1024 * 1024))"]
+        monkeypatch.setattr(remote, "remote_argv", lambda h, *a: big)
+        views, _ = remote.fetch([remote.Host("kelun")], deadline=5.0, net={})
+        assert views[0].problem and not views[0].sessions
+
+    def test_a_long_field_is_capped(self):
+        body = json.dumps({"sessions": [{"name": "n" * 10000}]}).encode()
+        assert len(remote._parse(body)[0][0]["name"]) == remote.MAX_FIELD
+
+    def test_terminal_escapes_from_a_peer_never_reach_the_screen(self):
+        body = json.dumps({"sessions": [{"name": "a", "origin": "o",
+                                         "charter": "x\x1b[2J\x1b[Hforged\x9b",
+                                         "claims": ["\x1b]0;t\x07"]}]}).encode()
+        out = remote.render([remote.HostView("k", sessions=remote._parse(body)[0])], "o")
+        assert "\x1b" not in out and "\x9b" not in out and "\x07" not in out
+        assert "forged" in out
+
+
+class TestRemoteDoorbellBudget:
+    def test_an_over_budget_sender_files_remotely_without_ringing(self, home, monkeypatch):
+        from sessioncoord.model import Presence
+        hosts_file(home, monkeypatch, "kelun\n")
+        seen = {}
+        monkeypatch.setattr(remote, "_spawn",
+                            lambda argv, stdin=None: seen.setdefault("argv", argv) and FakeProc())
+        me = Presence(session_id="s1", repo_root="/r", workdir="/r", title="guard")
+        monkeypatch.setattr(cli, "_me_anywhere", lambda repo: me)
+        monkeypatch.setattr(cli._Doorbell, "reserve", lambda self: "three doorbells this hour")
+        cli.main(["msg", "peer@kelun", "hi"])
+        assert "--no-ring" in seen["argv"][-1]
+
+    def test_within_budget_the_far_box_may_ring(self, home, monkeypatch):
+        hosts_file(home, monkeypatch, "kelun\n")
+        seen = {}
+        monkeypatch.setattr(remote, "_spawn",
+                            lambda argv, stdin=None: seen.setdefault("argv", argv) and FakeProc())
+        monkeypatch.setattr(cli, "_me_anywhere", lambda repo: None)
+        monkeypatch.setattr(cli._Doorbell, "reserve", lambda self: None)
+        cli.main(["msg", "peer@kelun", "hi"])
+        assert "--no-ring" not in seen["argv"][-1]

@@ -198,3 +198,18 @@ class TestMsgAcceptsASessionIdTarget:
                             lambda t, x, run=None, expect_pid=None, **kw: seen.update(target=t) or t)
         cli.main(["msg", "--repo", "/repo", "%74", "a message"])
         assert seen["target"] == "%74"
+
+
+class TestNoRingFilesWithoutRinging:
+    """What a remote sender over its budget asks for: the mail is filed, the pane untouched."""
+
+    def test_a_registered_peer_is_filed_and_not_rung(self, home, fake_world, monkeypatch):
+        store.save(rec("peer", pane="%74", pid=171425))
+        monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **k: pytest.fail("rang"))
+        assert cli.main(["msg", "--repo", "/repo", "peer", "hi", "--no-ring"]) == 0
+        assert [m.recipient for m in store.load_inbox("/repo")] == ["peer"]
+
+    def test_an_unregistered_name_is_held_and_not_typed(self, home, fake_world, monkeypatch):
+        monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **k: pytest.fail("typed"))
+        assert cli.main(["msg", "--repo", "/repo", "nobody-yet", "hi", "--no-ring"]) == 0
+        assert [m.recipient for m in store.load_held()] == ["nobody-yet"]
