@@ -981,6 +981,13 @@ def cmd_msg(args) -> int:
             hits, recipient_repo = search(primary)
         if not hits:
             hits, recipient_repo = search(alias)
+        if not hits and by_name and table is not None:
+            # Last, a tmux WINDOW name: what a launching session called its worker. Without it a
+            # registered peer addressed by window name fell to the unregistered path and was
+            # typed at rather than filed (2026-11-06 handoff, V9).
+            wnames = tmuxio.window_names() or {}
+            hits, recipient_repo = search(
+                lambda p: bool(p.pane) and _held_key(wnames.get(p.pane, "")) == want)
         if len(hits) > 1:
             where = ", ".join(sorted(f"{p.repo_root}: {p.session_id} ({p.pane})"
                                      for p in hits))

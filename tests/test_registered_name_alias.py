@@ -182,3 +182,26 @@ def test_inbox_session_naming_nobody_refuses_and_mentions_held_mail(world, capsy
     err = capsys.readouterr().err
     assert "no live session" in err and "1 held message(s)" in err
     assert [m.id for m in store.load_held()] == ["held-9"]
+
+
+def test_msg_by_window_name_files_for_the_registered_session(world):
+    # 2026-11-06: "codex-p2v1" was the tmux window name; msg answered "no pane matches".
+    world.setattr(cli.tmuxio, "window_names", lambda run=None: {"%2": "codex-p2v1"})
+    world.setattr(cli.tmuxio, "send", lambda t, x, **kw: t)
+    assert cli.main(["msg", "--repo", REPO, "codex-p2v1", "by window"]) == 0
+    assert [(m.recipient, m.body) for m in store.load_inbox(REPO)] == [("d0e290a3-0000",
+                                                                       "by window")]
+
+
+def test_pane_of_window_name_resolves_one_engine_pane_and_refuses_two(monkeypatch):
+    from sessioncoord import tmuxio
+    table = {"%1": {"claude_pid": 10, "title": "a"}, "%2": {"claude_pid": None, "title": "sh"},
+             "%3": {"claude_pid": 30, "title": "b"}}
+    monkeypatch.setattr(tmuxio, "panes", lambda run=None: table)
+    monkeypatch.setattr(tmuxio, "window_names",
+                        lambda run=None: {"%1": "codex-p2v1", "%2": "codex-p2v1", "%3": "x"})
+    assert tmuxio.pane_of_window_name("codex-p2v1") == "%1"
+    monkeypatch.setattr(tmuxio, "window_names",
+                        lambda run=None: {"%1": "w", "%2": "w", "%3": "w"})
+    with pytest.raises(tmuxio.AmbiguousTarget):
+        tmuxio.pane_of_window_name("w")

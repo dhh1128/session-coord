@@ -48,3 +48,14 @@ def _no_real_engine_walk(monkeypatch):
     from sessioncoord import procio
     monkeypatch.setattr(procio, "nearest_engine", lambda pid=None: None)
     monkeypatch.setattr(procio, "codex_server_above", lambda pid=None: False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_window_names(monkeypatch):
+    """`cli` looks up tmux window names when nothing else matches a `msg` target, and the real
+    server's windows must not decide a test. A test about window names sets its own."""
+    from sessioncoord import tmuxio
+    real = tmuxio.window_names
+    monkeypatch.setattr(tmuxio, "window_names",
+                        lambda run=None: real(run) if run is not None else {})
+

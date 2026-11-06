@@ -376,6 +376,45 @@ def pane_of_title(title: str, run: Runner = _run) -> str | None:
     return hits[0] if hits else None
 
 
+def window_names(run: Runner = _run) -> dict[str, str] | None:
+    """Each pane's tmux WINDOW name, keyed by pane id. None when tmux could not be asked.
+
+    Read separately from `panes`, whose row shape callers and tests depend on. A window name
+    is what Daniel and launching sessions call a worker ("codex-p2v1", from `new-window -n`),
+    and before this `msg codex-p2v1` answered "no pane matches" (2026-11-06 handoff, V9).
+    """
+    out = run(["tmux", "list-panes", "-a", "-F", "#{pane_id}	#{window_name}"])
+    if out is None:
+        return None
+    names = {}
+    for line in out.splitlines():
+        pane, _, name = line.partition("	")
+        if pane:
+            names[pane] = name
+    return names
+
+
+def pane_of_window_name(name: str, run: Runner = _run) -> str | None:
+    """The single engine pane in a window called `name` (case-insensitive), or None.
+
+    Raises `AmbiguousTarget` when two such panes exist, in one split window or in two windows
+    sharing a name, for `pane_of_window`'s reason.
+    """
+    want = (name or "").strip().lower()
+    table = panes(run)
+    names = window_names(run) if table else None
+    if not want or not table or not names:
+        return None
+    hits = [pane for pane, info in table.items()
+            if info["claude_pid"] is not None and names.get(pane, "").strip().lower() == want]
+    if len(hits) > 1:
+        raise AmbiguousTarget(
+            f"{name!r} is the window of {len(hits)} sessions ({', '.join(sorted(hits))}). "
+            "Address a pane id or a session id instead."
+        )
+    return hits[0] if hits else None
+
+
 def claude_pids(run: Runner = _run) -> dict[str, int | None | _UnknownPid] | None:
     """The liveness map, or None when tmux could not be consulted. See `liveness.PaneMap`."""
     table = panes(run)
@@ -698,7 +737,8 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
             raise SendRefused("tmux could not be consulted; nothing was sent.")
         try:
             pane = target if target in table else (
-                pane_of_window(target, run) or pane_of_title(target, run))
+                pane_of_window(target, run) or pane_of_title(target, run)
+                or pane_of_window_name(target, run))
         except AmbiguousTarget as e:
             raise SendRefused(f"{e} Nothing was sent.") from None
         if pane is None or pane not in table:
