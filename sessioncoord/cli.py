@@ -1175,10 +1175,12 @@ def cmd_inbox(args) -> int:
                     try:
                         store.save_held([m for m in held if m.id not in moved_ids])
                     except OSError as e:
-                        added = {m.id for m in moved}
-                        queue = [m for m in queue if m.id not in added]
+                        # Every selected id, not only those this read added: a copy left by
+                        # an earlier read whose restore failed is just as much in two places.
+                        present = {m.id for m in queue} & moved_ids
+                        queue = [m for m in queue if m.id not in moved_ids]
                         try:
-                            if added:
+                            if present:
                                 store.save_inbox(repo, queue)
                             print(f"session-coord: held mail could not be updated, so it stays "
                                   f"held until it can be: {e}", file=sys.stderr)

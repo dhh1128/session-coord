@@ -435,3 +435,32 @@ def test_a_removal_that_fails_after_the_check_takes_the_message_back(estate, cap
     assert "body mine" not in out.out and "stays held" in out.err
     assert [m.id for m in store.load_held()] == ["mine"]
     assert store.load_inbox(OTHER) == []
+
+
+def test_a_copy_left_by_a_failed_restore_is_taken_back_on_the_next_read(estate, capsys):
+    from datetime import datetime, timezone
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    store.save_held([_held("mine", fresh)])
+    # What an earlier read leaves when both its removal and its restore failed.
+    store.save_inbox(OTHER, [replace_recipient(_held("mine", fresh), "peer")])
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+    real_save = store.save_held
+    calls = []
+
+    def first_ok_then_refuse(messages):
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("still failing")
+        return real_save(messages)
+
+    estate.setattr(store, "save_held", first_ok_then_refuse)
+    assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+    assert "body mine" not in capsys.readouterr().out
+    assert store.load_inbox(OTHER) == []
+    assert [m.id for m in store.load_held()] == ["mine"]
+
+
+def replace_recipient(m, who):
+    from dataclasses import replace
+    return replace(m, recipient=who)
