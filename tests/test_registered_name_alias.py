@@ -24,7 +24,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.gitio, "facts", lambda r, run=None: None)
     monkeypatch.setattr(cli.tmuxio, "server_pid", lambda run=None: "999")
     store.save(Presence(session_id="d0e290a3-0000", repo_root=REPO, workdir=REPO, pane="%2",
-                        claude_pid=2, title="pr1685-attribs", tmux_server="999"))
+                        claude_pid=2, title="pr1685-attribs", tmux_server="999", named=True))
     table = {"%2": {"pane": "%2", "window": "bakobo:9", "claude_pid": 2,
                     "title": "PR1685-attribs brief"}}
     monkeypatch.setattr(cli, "_live_table", lambda: table)
@@ -71,7 +71,7 @@ def test_a_live_title_elsewhere_outranks_a_local_registered_name(world):
     # Hostile p1.1: local session registered "alpha", now titled "beta"; a peer in another repo
     # is titled "alpha" right now. `msg alpha` must reach the peer.
     store.save(Presence(session_id="local-1", repo_root=REPO, workdir=REPO, pane="%3",
-                        claude_pid=3, title="alpha", tmux_server="999"))
+                        claude_pid=3, title="alpha", tmux_server="999", named=True))
     store.save(Presence(session_id="remote-1", repo_root="/other", workdir="/other", pane="%4",
                         claude_pid=4, title="alpha", tmux_server="999"))
     table = {"%2": {"pane": "%2", "window": "bakobo:9", "claude_pid": 2, "title": "x"},
@@ -102,3 +102,39 @@ def test_re_registering_without_a_name_keeps_the_registered_one(world, monkeypat
                      "--charter", "new charter"]) == 0
     rec = [p for p in store.load_all(REPO) if p.session_id == "d0e290a3-0000"][0]
     assert rec.title == "pr1685-attribs"
+
+
+def test_an_automatic_title_is_not_kept_or_aliased(world, monkeypatch):
+    # Fix pass finding 1: a title read from the pane, never given with --name.
+    store.save(Presence(session_id="auto-1", repo_root=REPO, workdir=REPO, pane="%5",
+                        claude_pid=5, title="claude", tmux_server="999"))
+    table = {"%2": {"pane": "%2", "window": "bakobo:9", "claude_pid": 2, "title": "x"},
+             "%5": {"pane": "%5", "window": "w:5", "claude_pid": 5, "title": "new task"}}
+    monkeypatch.setattr(cli, "_live_table", lambda: table)
+    monkeypatch.setattr(cli.tmuxio, "claude_pids", lambda run=None: {"%2": 2, "%5": 5})
+    monkeypatch.setattr(cli.tmuxio, "window_of", lambda pane, run=None: "w:5")
+    monkeypatch.setattr(cli, "_title_of", lambda pane: "new task")
+    monkeypatch.setenv("TMUX_PANE", "%5")
+    assert cli.main(["register", "--repo", REPO, "--session", "auto-1", "--pid", "5"]) == 0
+    rec = [p for p in store.load_all(REPO) if p.session_id == "auto-1"][0]
+    assert rec.title == "new task" and not rec.named
+    monkeypatch.setattr(cli.tmuxio, "send", lambda t, x, **kw: t)
+    cli.main(["msg", "--repo", REPO, "claude", "hello"])
+    assert [m.recipient for m in store.load_inbox(REPO)] == []
+
+
+def test_tmux_reads_do_not_grow_with_the_estate(world, monkeypatch):
+    # Fix pass finding 2: a miss scanned every repo twice, reading tmux for each.
+    table = {"%2": {"pane": "%2", "window": "bakobo:9", "claude_pid": 2, "title": "x"}}
+    monkeypatch.setattr(cli.tmuxio, "send", lambda t, x, **kw: t)
+
+    def reads():
+        calls = []
+        monkeypatch.setattr(cli, "_live_table", lambda: calls.append(1) or table)
+        cli.main(["msg", "--repo", REPO, "nobody-at-all", "hello"])
+        return len(calls)
+
+    few = reads()
+    for i in range(20):
+        store.save(Presence(session_id=f"x{i}", repo_root=f"/r{i}", workdir=f"/r{i}"))
+    assert reads() == few

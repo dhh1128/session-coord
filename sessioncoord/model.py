@@ -40,6 +40,10 @@ class Presence:
     #: Claude Code rewrites as a conversation goes, and mail addressed to the `--name` a session
     #: registered with must still find it (2026-11-06).
     registered_name: str = ""
+    #: True when `title` came from `register --name`, not from the pane. Only such a name is
+    #: kept over a later pane title and offered as an alias; an automatic title is just a
+    #: snapshot of what Claude Code called the pane once.
+    named: bool = False
     # Process occupying the pane is stored in claude_pid for compatibility with old records.
     engine: str = "claude"
     charter: str = ""

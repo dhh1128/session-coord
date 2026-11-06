@@ -118,7 +118,7 @@ def _live(records, table=None):
         if info and (p.claude_pid is None or info["claude_pid"] == p.claude_pid):
             live_title = info.get("title") or p.title
             p = p.with_(window=info["window"], title=live_title,
-                        registered_name=p.title if p.title != live_title else "")
+                        registered_name=p.title if p.named and p.title != live_title else "")
         else:
             # Its pane is gone or holds someone else, so its stored window is a number another
             # session may hold now. Kept, `msg <window>` matched it and filed into the dead
@@ -289,8 +289,10 @@ def _register_locked(args, repo: str) -> int:
         # A name already on record outranks the pane's title: Claude Code retitles a pane as the
         # conversation goes, and a re-register without --name (a /clear, a resume, a charter
         # update) otherwise replaced the --name peers address it by (hostile pass, finding 3).
-        title=(getattr(args, "name", None) or (inherited.title if inherited else "")
-               or _title_of(pane)),
+        title=(getattr(args, "name", None)
+               or (inherited.title if inherited and inherited.named else "")
+               or _title_of(pane) or (inherited.title if inherited else "")),
+        named=bool(getattr(args, "name", None)) or bool(inherited and inherited.named),
         # A re-register without --pid must not blank the pid. The documented charter/claim
         # update in SKILL.md omits it, so this path is the common one, and a null pid makes
         # the next sweep treat a running session as dead.
@@ -685,12 +687,22 @@ def cmd_msg(args) -> int:
                          or (by_name and _held_key(p.title) == want))
     alias = lambda p: by_name and bool(p.registered_name) and _held_key(p.registered_name) == want
 
+    # One tmux read and one load per repo, shared by both tiers: a miss used to scan the estate
+    # twice, querying tmux for every repo each time (hostile pass, finding 2).
+    table = _live_table()
+    cache: dict[str, list] = {}
+
+    def live_in(r):
+        if r not in cache:
+            cache[r] = _live(store.load_all(r), table)
+        return cache[r]
+
     def search(matches):
-        local = [p for p in _live(store.load_all(repo)) if matches(p)]
+        local = [p for p in live_in(repo) if matches(p)]
         if local:
             return local, repo
         found = [(other, p) for other in store.known_repos() if other != repo
-                 for p in _live(store.load_all(other)) if matches(p)]
+                 for p in live_in(other) if matches(p)]
         return [p for _, p in found], (found[0][0] if len(found) == 1 else repo)
     if repo:
         # EVERY match, not the first one. A window label can name two registered sessions -- a
