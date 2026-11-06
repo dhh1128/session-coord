@@ -230,3 +230,14 @@ def test_an_unfinished_walk_does_not_trust_the_environment(monkeypatch):
     monkeypatch.setattr(procio, "parent_of", lambda pid: pid + 1)
     monkeypatch.setattr(procio, "argv_of", lambda pid: ["bash"])
     assert procio.codex_server_above(2) is True
+
+
+def test_register_refuses_an_inherited_daemon_pid_and_an_unreadable_one(world, monkeypatch):
+    # Hostile fix-diff pass on #11: a prior record already naming the daemon, and a live pid
+    # whose command line could not be read.
+    store.save(Presence(session_id="t", repo_root="/w", workdir="/w", pane=None,
+                        claude_pid=1352327, engine="codex", pid_started="t1352327"))
+    monkeypatch.setattr(procio, "argv_of", lambda pid: DAEMON if pid == 1352327 else None)
+    assert cli.main(["register", "--session", "t", "--charter", "x"]) == 2
+    assert cli.main(["register", "--session", "u", "--engine", "codex", "--pid", "5555"]) == 2
+    assert [p.session_id for p in store.load_all("/w")] == ["t"]

@@ -236,11 +236,6 @@ def _register_locked(args, repo: str) -> int:
     # ancestry and TMUX_PANE both belong to the TUI that started the daemon. Detecting from
     # them recorded the daemon's pid, which liveness rejects and the next sweep deletes, so
     # the session was absent from the board while it went on sending mail (2026-11-06).
-    if args.pid is not None and procio.is_codex_server(procio.argv_of(args.pid)):
-        print(f"session-coord: not registered. {args.pid} is Codex's shared app-server daemon, "
-              "which every attached session shares; it identifies none of them. Pass the pid "
-              "of this session's own codex process.", file=sys.stderr)
-        return 2
     if (procio.under_codex_server() and args.pid is None and prior is None):
         print("session-coord: not registered. This command runs inside Codex's shared "
               "app-server daemon, so neither its process ancestry nor TMUX_PANE says which "
@@ -299,6 +294,18 @@ def _register_locked(args, repo: str) -> int:
                     (detected_pid if detected_engine == engine else
                      (procio.codex_ancestor() if engine == "codex"
                       else procio.claude_ancestor()))))
+
+    # The shared daemon identifies none of the sessions attached to it, whether its pid came
+    # from --pid or from a record that already held it. An unreadable command line for a live
+    # pid is not evidence that it is something else (hostile fix-diff pass on #11).
+    if engine == "codex" and session_pid is not None:
+        argv = procio.argv_of(session_pid)
+        if procio.is_codex_server(argv) or (argv is None and procio.start_of(session_pid)):
+            print(f"session-coord: not registered. {session_pid} is Codex's shared app-server "
+                  "daemon, or a process whose command line could not be read; the daemon is "
+                  "shared by every attached session and identifies none of them. Pass the pid "
+                  "of this session's own codex process.", file=sys.stderr)
+            return 2
 
     # Liveness accepts a Codex record only when its pid is the codex process the pane scan finds.
     # A record with any other pid -- the npm launcher, the daemon -- is saved, reads as dead,
