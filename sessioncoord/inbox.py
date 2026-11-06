@@ -178,8 +178,12 @@ EMPTY = ("Inbox empty. Mail the start-of-turn hook already put into one of your 
          "marked read and not listed here, so look in your recent turns before asking a peer "
          "to resend.\n")
 
-DELIVERED = ("Delivered into this turn and marked read, so `session-coord inbox` will not list "
-             "these again.")
+# Written before the hook's acknowledgement runs, so it says what happens next rather than
+# claiming it has happened: a failed acknowledgement repeats the mail next turn (hostile pass
+# on PR #13), which is the safe direction and the one thing this text must not hide.
+DELIVERED = ("Delivered into this turn; the hook marks these read once it has, so "
+             "`session-coord inbox` will not normally list them again. If it does, they were "
+             "not acknowledged and this turn's copy is the same mail.")
 
 
 def render(messages: Sequence[Message], marked_read: bool = True, you: str = "",

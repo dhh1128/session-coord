@@ -570,7 +570,7 @@ class TestAcknowledgingOnlyWhatWasDelivered:
         assert store.load_inbox("/repo")[0].read is False
         # The hook acknowledges this snapshot right after delivering it, so the footer its
         # reader sees must not say "Still unread" (sumago, 2026-11-06).
-        assert "Still unread" not in out and "will not list these again" in out
+        assert "Still unread" not in out and "will not normally list them again" in out
 
     def test_an_empty_inbox_points_at_mail_the_hook_delivered(self, home, fake_world, rings,
                                                              capsys):
