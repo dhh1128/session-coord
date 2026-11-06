@@ -155,6 +155,28 @@ class TestMsgAcceptsASessionIdTarget:
         assert [m.recipient for m in store.load_inbox("/other")] == ["victim-id"]
         assert store.load_inbox("/repo") == []
 
+    def test_a_session_id_in_several_repos_goes_to_the_one_with_a_live_pane(
+            self, home, fake_world, monkeypatch):
+        store.save(Presence(session_id="sid", repo_root="/current", workdir="/current",
+                            pane="%1", claude_pid=111, updated="2026-11-06T10:00:00+00:00"))
+        store.save(Presence(session_id="sid", repo_root="/abandoned", workdir="/abandoned",
+                            pane=None, claude_pid=111, updated="2026-11-06T11:00:00+00:00"))
+        monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **k: "%1")
+        assert cli.main(["msg", "--repo", "/repo", "sid", "hi"]) == 0
+        assert [m.recipient for m in store.load_inbox("/current")] == ["sid"]
+        assert store.load_inbox("/abandoned") == []
+
+    def test_a_session_id_with_no_way_to_choose_is_refused_not_guessed(
+            self, home, fake_world, capsys):
+        # Neither record has a pane, and one has no timestamp: refused, without comparing.
+        store.save(Presence(session_id="sid", repo_root="/a", workdir="/a", pane=None,
+                            claude_pid=1, updated=None))
+        store.save(Presence(session_id="sid", repo_root="/b", workdir="/b", pane=None,
+                            claude_pid=1, updated="2026-11-06T11:00:00+00:00"))
+        assert cli.main(["msg", "--repo", "/repo", "sid", "hi"]) == 2
+        assert "does not name one" in capsys.readouterr().err
+        assert store.load_inbox("/a") == [] and store.load_inbox("/b") == []
+
     def test_a_pane_target_is_left_alone(self, home, fake_world, monkeypatch):
         store.save(rec("s1", pane="%74", pid=171425))
         seen = {}
