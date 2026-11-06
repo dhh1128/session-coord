@@ -116,7 +116,9 @@ def _live(records, table=None):
             out.append(p)
             continue
         if info and (p.claude_pid is None or info["claude_pid"] == p.claude_pid):
-            p = p.with_(window=info["window"], title=info.get("title") or p.title)
+            live_title = info.get("title") or p.title
+            p = p.with_(window=info["window"], title=live_title,
+                        registered_name=p.title if p.title != live_title else "")
         else:
             # Its pane is gone or holds someone else, so its stored window is a number another
             # session may hold now. Kept, `msg <window>` matched it and filed into the dead
@@ -674,7 +676,7 @@ def cmd_msg(args) -> int:
     want = _held_key(args.target)
     matches = lambda p: (args.target in (p.pane, p.window, p.session_id)
                          or (want and not want.startswith("%")
-                             and _held_key(p.title) == want))
+                             and want in (_held_key(p.title), _held_key(p.registered_name))))
     if repo:
         # EVERY match, not the first one. A window label can name two registered sessions -- a
         # split window is the ordinary way -- and taking the first meant the body was filed into
@@ -1071,7 +1073,8 @@ def _held_key(value: str) -> str:
 
 def _held_names(p: Presence) -> set[str]:
     """Names by which held mail can find a session on a later turn."""
-    return {name for name in (_held_key(p.title), _held_key(p.session_id)) if name}
+    return {name for name in (_held_key(p.title), _held_key(p.registered_name),
+                              _held_key(p.session_id)) if name}
 
 
 def cmd_inbox(args) -> int:
