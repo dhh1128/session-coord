@@ -779,6 +779,10 @@ class _Doorbell:
     # It costs a sender one doorbell an hour when a peer is unreachable. That is visible in the
     # log and self-correcting within the hour, which is the direction this module has learned
     # to fail in.
+    #
+    # The cheap half of a refund came back without a refund: `msg` runs `tmuxio.preflight`
+    # BEFORE reserving, and a refusal there has typed nothing, so nothing is charged. Only a
+    # refusal that `send` itself raises after the preflight passed is charged (2026-11-06).
 
     def tail(self):
         if self.charge is None:
@@ -1118,6 +1122,14 @@ def cmd_msg(args) -> int:
         # until it looks; ringing makes it spend a turn reading and usually another replying.
         # So what is rationed is interrupting a peer -- a far narrower claim than telling one
         # something -- and an over-budget message is still delivered, just quietly.
+        # Checked before the budget is taken: a pane that is mid-turn, or holds no session,
+        # refuses without typing anything, and that should not cost a doorbell (handoff V7).
+        try:
+            tmuxio.preflight(target, expect_pid=expect, force=args.force)
+        except tmuxio.SendRefused as e:
+            print(f"filed for {recipient.label}, but the doorbell could not be rung (no "
+                  f"doorbell was charged): {e}", file=sys.stderr)
+            return 0
         bell = _Doorbell(repo, sender_id, args.target, reply, override)
         refused = bell.reserve()
         if refused:
@@ -1142,8 +1154,17 @@ def cmd_msg(args) -> int:
     # addresses can be recycled, so holding mail under either could give it to another process.
     # A successful direct send must not also be filed: that would put the same message in two turns.
     bell = _Doorbell(repo, sender_id, args.target, reply, override)
-    refused = ("the sender's doorbell budget is spent" if getattr(args, "no_ring", False)
-               else bell.reserve())
+    refused = None
+    if getattr(args, "no_ring", False):
+        refused = "the sender's doorbell budget is spent"
+    else:
+        # Before the budget, for the same reason as the registered path above (handoff V7).
+        try:
+            tmuxio.preflight(target, expect_pid=expect, force=args.force)
+        except tmuxio.SendRefused as e:
+            refused = str(e)
+    if refused is None:
+        refused = bell.reserve()
     if not refused:
         try:
             pane = tmuxio.send(target, comms.compose(args.text, reply), expect_pid=expect,

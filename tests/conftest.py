@@ -59,3 +59,12 @@ def _no_real_window_names(monkeypatch):
     monkeypatch.setattr(tmuxio, "window_names",
                         lambda run=None: real(run) if run is not None else {})
 
+
+@pytest.fixture(autouse=True)
+def _preflight_passes(monkeypatch):
+    """`msg` runs `tmuxio.preflight` before it charges a doorbell, and it reads the real tmux
+    server. Most tests stub `send` and mean "the send is attempted", so the default here is a
+    preflight that passes; a test about preflight restores the real one."""
+    from sessioncoord import tmuxio
+    monkeypatch.setattr(tmuxio, "preflight", lambda target, run=None, **kw: target)
+
