@@ -17,6 +17,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -143,10 +144,15 @@ def tailnet(raw: str | None) -> dict[str, dict] | None:
         d = json.loads(raw)
     except ValueError:
         return None
-    if d.get("BackendState") not in (None, "Running"):
+    if not isinstance(d, dict) or d.get("BackendState") not in (None, "Running"):
+        return None
+    peers = d.get("Peer") or {}
+    if not isinstance(peers, dict):
         return None
     out = {}
-    for p in (d.get("Peer") or {}).values():
+    for p in peers.values():
+        if not isinstance(p, dict):
+            continue
         names = {str(p.get("HostName") or "").lower(),
                  str(p.get("DNSName") or "").split(".", 1)[0].lower()}
         info = {"online": bool(p.get("Online")), "last_seen": str(p.get("LastSeen") or "")}
@@ -210,7 +216,10 @@ def _save_cache(view: HostView) -> None:
 def _load_cache(host: str) -> tuple[list[dict], list[dict], str] | None:
     try:
         d = json.loads(_cache_file(host).read_text())
-        return list(d["sessions"]), list(d.get("worktrees") or []), str(d["fetched"])
+        parsed = _parse(json.dumps(d).encode())
+        if parsed is None:
+            return None
+        return parsed[0], parsed[1], str(d["fetched"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -229,8 +238,27 @@ def _parse(out: bytes) -> tuple[list[dict], list[dict]] | None:
         return None
     trees = d.get("worktrees")
     trees = trees if isinstance(trees, list) else []
-    return ([s for s in sessions if isinstance(s, dict)],
-            [t for t in trees if isinstance(t, dict)])
+    return ([_clean(x, _SESSION_FIELDS) for x in sessions if isinstance(x, dict)],
+            [_clean(x, _TREE_FIELDS) for x in trees if isinstance(x, dict)])
+
+
+_SESSION_FIELDS = ("name", "label", "repo_root", "workdir", "branch", "charter", "role",
+                   "origin", "engine")
+_TREE_FIELDS = ("repo_root", "origin", "path", "branch")
+
+
+def _clean(d: dict, fields: tuple[str, ...]) -> dict:
+    """Only the fields the board reads, each a string (claims a list of strings).
+
+    A peer's answer is input like any other: one malformed field must cost that field, not
+    the board, and must not be cached in a shape the renderer cannot handle.
+    """
+    out = {k: d[k] if isinstance(d.get(k), str) else "" for k in fields}
+    if "claims" in d or fields is _SESSION_FIELDS:
+        claims = d.get("claims")
+        out["claims"] = ([c for c in claims if isinstance(c, str)]
+                         if isinstance(claims, list) else [])
+    return out
 
 
 def _why(code: int | None, err: bytes) -> str:
@@ -274,15 +302,33 @@ def fetch(hosts: list[Host], deadline: float = DEADLINE, net=None) -> tuple[list
                 live[h.name] = _spawn(remote_argv(h, "board", "--estate", "--json"))
             except OSError as e:
                 views[h.name] = HostView(h.name, problem=f"could not start ssh: {e}")
+    # One reader thread per host, so a slow first host cannot use up the budget of a fast
+    # second one: sequential communicate() calls would leave a finished answer unread until the
+    # deadline and then reject it.
     end = time.monotonic() + deadline
-    for name, proc in live.items():
+    answers: dict[str, tuple[bytes, bytes] | None] = {}
+
+    def read(name, proc):
         try:
-            out, err = proc.communicate(timeout=max(0.0, end - time.monotonic()))
+            answers[name] = proc.communicate(timeout=max(0.0, end - time.monotonic()))
         except subprocess.TimeoutExpired:
+            answers[name] = None
+    threads = [threading.Thread(target=read, args=item, daemon=True) for item in live.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(max(0.0, end - time.monotonic()) + 1.0)
+    for name, proc in live.items():
+        got = answers.get(name)
+        if got is None:
             proc.kill()
-            proc.communicate()
+            try:
+                proc.communicate(timeout=1.0)
+            except (subprocess.TimeoutExpired, ValueError):
+                pass
             views[name] = HostView(name, problem=f"no answer within {deadline:g}s")
             continue
+        out, err = got
         parsed = _parse(out) if proc.returncode == 0 else None
         if parsed is None:
             problem = (_why(proc.returncode, err) if proc.returncode
@@ -318,11 +364,17 @@ def normalise_origin(url: str) -> str:
     m = re.match(r"^([^/:]+):(?!\d+/)(.*)$", u)
     if m:
         u = f"{m.group(1)}/{m.group(2)}"
-    u = re.sub(r":\d+/", "/", u, count=1)
+    # Only the default ports are dropped; another port is another service.
+    u = re.sub(r"^([^/]+):(?:22|443)/", r"\1/", u, count=1)
     u = u.rstrip("/")
     if u.endswith(".git"):
         u = u[:-4]
-    return u.lower()
+    host, _, path = u.partition("/")
+    host = host.lower()
+    # GitHub and GitLab treat owner/repo case-insensitively; another server may not.
+    if host in ("github.com", "gitlab.com"):
+        path = path.lower()
+    return f"{host}/{path}" if path else host
 
 
 def origin_of(repo: str) -> str:

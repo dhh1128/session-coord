@@ -742,16 +742,30 @@ def _msg_remote(args, name: str, host) -> int:
     The remote side files and rings exactly as a local send would, so held mail, the inbox
     and the doorbell all behave the same; only the sender label says where it came from.
     """
-    # The NAME, not the label: the label carries "(now me:2)", and the recipient answers by
-    # pasting what it was given, so the sender line has to be an address that works from there.
+    # The recipient answers by pasting what it was given, so the sender line has to carry an
+    # address that still works when it does. Not the label, which carries "(now me:2)", and
+    # not only the name: a title changes when the session is renamed and a window number when
+    # another window closes. The session id lasts as long as the session, and `msg` resolves
+    # it exactly on the far side. The name stays first because it is what a reader recognises.
     me = _me_anywhere(_resolve_repo(args))
-    sender = args.sender or (me.name if me else "a peer")
-    argv = ["msg", name, "-", "--sender", f"{sender}@{remote.local_host()}",
+    here = remote.local_host()
+    if args.sender:
+        sender = f"{args.sender}@{here}"
+    elif me:
+        sender = f"{me.name}@{here} (reply to {me.session_id}@{here})"
+    else:
+        sender = f"a peer@{here}"
+    argv = ["msg", name, "-", "--sender", sender,
             "--reply", getattr(args, "reply", comms.REPLY_NONE)]
     if args.subject:
         argv += ["--subject", args.subject]
     if getattr(args, "override", ""):
         argv += ["--override", args.override]
+    # The pane-reuse guard and --force mean the same thing on the far box, where the pid lives.
+    if args.pid is not None:
+        argv += ["--pid", str(args.pid)]
+    if args.force:
+        argv += ["--force"]
     blocked = remote.sandboxed()
     if blocked:
         print(f"session-coord: nothing sent to {name}@{host.name}: {blocked}.", file=sys.stderr)
