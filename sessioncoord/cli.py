@@ -343,6 +343,40 @@ def cmd_board(args) -> int:
     return 0
 
 
+def cmd_claim(args) -> int:
+    """Add to this session's claims without restating them.
+
+    `register --claim` REPLACES the list, which is right for a charter and wrong for "I am
+    about to write one more file": a session following a refusal's advice would silently drop
+    every claim it already held. This appends, de-duplicated, under the presence lock.
+    """
+    repo = _resolve_repo(args)
+    if repo is None:
+        print("session-coord: not a git repo; nothing claimed.", file=sys.stderr)
+        return 2
+    try:
+        with locks.hold(repo, "presence", wait=args.wait, owner="claim"):
+            records = _live(store.load_all(repo))
+            me = (next((p for p in records if p.session_id == args.session), None)
+                  if args.session else _me(repo))
+            if me is None:
+                print("session-coord: this session has no record here, so there is nothing to "
+                      "add claims to. It registers at session start; if it did not, run "
+                      "`session-coord register --name <name> --charter '...' --claim <path>`.",
+                      file=sys.stderr)
+                return 2
+            claims = list(me.claims)
+            added = [c for c in args.paths if c not in claims]
+            claims += [c for i, c in enumerate(added) if c not in added[:i]]
+            store.save(replace(me, claims=tuple(claims), updated=_now()))
+    except locks.Busy as e:
+        print(f"session-coord: {e}", file=sys.stderr)
+        return 75
+    print(f"claimed: {' '.join(added) if added else '(nothing new)'}; "
+          f"this session now claims {len(claims)} path(s)")
+    return 0
+
+
 def cmd_check(args) -> int:
     repo = _resolve_repo(args)
     if repo is None:
@@ -367,6 +401,11 @@ def cmd_check(args) -> int:
             # the tree root. 2026-11-02, the docs-repo incident.
             findings = findings + detect.claimed_paths(
                 board, here, args.session or "", args.path)
+            if args.require_claim:
+                # In a repo that shares its checkout on purpose, the asking session must
+                # claim what it commits (2026-11-05, R-AS3C).
+                findings = findings + detect.unclaimed_paths(
+                    board, here, args.session or "", args.path)
     if args.json:
         print(json.dumps([{"code": f.code, "severity": f.severity, "summary": f.summary,
                            "detail": f.detail, "remedy": f.remedy,
@@ -1316,7 +1355,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with --workdir: report any of these tree-relative paths a peer claims")
     c.add_argument("--session", default="",
                    help="with --path: the asking session, whose own claims are excused")
+    c.add_argument("--require-claim", action="store_true",
+                   help="with --path: also report any of these the asking session has not "
+                        "claimed")
     c.set_defaults(func=cmd_check)
+
+    cl = sub.add_parser("claim", help="add paths to this session's claims, keeping the rest")
+    repo_arg(cl)
+    cl.add_argument("--session", default="", help="this session's id (default: found by pane)")
+    cl.add_argument("--wait", type=float, default=5.0)
+    cl.add_argument("paths", nargs="+", help="paths or globs, relative to the repo root")
+    cl.set_defaults(func=cmd_claim)
 
     s = sub.add_parser("sweep", help="drop records whose session is gone")
     repo_arg(s)

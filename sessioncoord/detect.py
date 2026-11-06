@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fnmatch
 import posixpath
+import shlex
 from collections import defaultdict
 from typing import Iterable, Sequence
 
@@ -149,7 +150,9 @@ def _shared_checkout(workdir: str, group: Sequence[Presence]) -> Finding:
         ),
         sessions=_labels(group),
         workdirs=(workdir,),
-        remedy=EXPLICIT_REMEDY,
+        remedy=("Claim each file before you commit it: `session-coord claim -- <file> "
+                "<file>`. Here the gate refuses a commit of any file this session has not "
+                "claimed. " + EXPLICIT_REMEDY),
     )
 
 
@@ -221,6 +224,52 @@ def claimed_paths(board: Board, workdir: str, session_id: str,
                 remedy=f"Leave {path} to {s.label}, or agree a hand-off with it first.",
             ))
             break
+    return out
+
+
+def unclaimed_paths(board: Board, workdir: str, session_id: str,
+                    paths: Iterable[str]) -> list[Finding]:
+    """Findings for the named paths the asking session has NOT claimed, in a repo that shares
+    its checkout on purpose.
+
+    2026-11-05, Daniel's call (R-AS3C): where sessions share a checkout by design, an explicit
+    path is not enough. Two sessions editing the same file each see it dirty, and an explicit
+    `git commit -- that.md` carries both sets of edits under one session's message. Nothing
+    records who dirtied a file, so a claim is the only evidence the gate can ask for. Requiring
+    it turns a silent overlap into a declaration both sessions can see.
+
+    One finding, listing every unclaimed path, so the refusal can hand back a single claim
+    line. A caller that cannot say who it is, or has no record in this tree, gets the same
+    finding for every path: excusing a path needs knowing whose claim it is.
+    """
+    here = workdir.rstrip("/")
+    me = next((s for s in board.sessions
+               if session_id and s.session_id == session_id and s.workdir.rstrip("/") == here),
+              None)
+    own = me.claims if me else ()
+    missing = [p for p in paths
+               if not any((rel := _claim_relative(c, here)) is not None and _claim_covers(rel, p)
+                          for c in own)]
+    if not missing:
+        return []
+    out = [Finding(
+        code="unclaimed-path",
+        severity="block",
+        summary=f"{len(missing)} path(s) this session has not claimed",
+        detail=" ".join(missing),
+        workdirs=(here,),
+        remedy="session-coord claim -- " + " ".join(shlex.quote(p) for p in missing),
+    )]
+    if me is None or (not me.charter and not me.claims):
+        out.append(Finding(
+            code="unoriented",
+            severity="note",
+            summary="this session has registered no charter and no claims",
+            detail=("" if me else "no record for this session in this tree"),
+            workdirs=(here,),
+            remedy=("Load the session-coord skill and follow 'Say who you are, what you are "
+                    "for, and what you will write'."),
+        ))
     return out
 
 

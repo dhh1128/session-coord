@@ -883,7 +883,7 @@ def staged_paths(root):
     return tuple(p for p in out.stdout.split("\0") if p)
 
 
-def ask(tree, cwd, paths=(), session=""):
+def ask(tree, cwd, paths=(), session="", require_claim=False):
     """The board's findings for `tree`, or None when the board could not be asked.
 
     --repo-of as well as --workdir. `git -C /other/repo add -A` issued from here writes to a
@@ -899,6 +899,8 @@ def ask(tree, cwd, paths=(), session=""):
         argv.append(f"--path={p}")
     if paths:
         argv.append(f"--session={session or ''}")
+        if require_claim:
+            argv.append("--require-claim")
     try:
         out = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=15)
         if not out.stdout.strip():
@@ -1025,25 +1027,49 @@ def main():
         form = staging_form(command, cwd, root)
     except Exception:
         form = _no("this command could not be read")
+    # A repo that shares its checkout on purpose also requires the committing session to have
+    # claimed what it commits (2026-11-05, R-AS3C); elsewhere a claim only has to be absent
+    # from peers.
+    by_design = f.get("severity") != "block"
     if form.ok and form.paths:
-        why = _owned(form, workdir or cwd, cwd, root, payload.get("session_id") or "")
+        why = _owned(form, workdir or cwd, cwd, root, payload.get("session_id") or "",
+                     require_claim=by_design)
         if not why:
             return 0
         return deny(_refusal(f, why))
-    return deny(_refusal(f, form.reason or "this command is not an explicit list of files",
-                         named=workdir is not None))
+    reason = form.reason or "this command is not an explicit list of files"
+    return deny(_refusal(f, reason, named=workdir is not None,
+                         hint=_unnamed_hint(command, cwd) if workdir is None else ""))
 
 
-def _owned(form, tree, cwd, root, session):
+def _owned(form, tree, cwd, root, session, require_claim=False):
     """"" when every named path is safe to stage; otherwise why not. Fail-closed."""
-    found = ask(tree, cwd, form.paths, session)
+    found = ask(tree, cwd, form.paths, session, require_claim=require_claim)
     if found is None:
         return "the board could not be asked whether another session claims these files"
-    claimed = [c for c in found if isinstance(c, dict) and c.get("code") == "claimed-path"]
+    found = [c for c in found if isinstance(c, dict)]
+    claimed = [c for c in found if c.get("code") == "claimed-path"]
     if claimed:
         lines = "; ".join(f"{c.get('detail', '')} by {', '.join(c.get('sessions') or [])}"
                           for c in claimed)
-        return f"these paths are claimed by another session in this tree: {lines}"
+        return (f"these paths are claimed by another session in this tree: {lines}. Leave them "
+                "to that session, or message it (`session-coord msg \"<its name>\" ...`) and "
+                "agree a hand-off before committing them")
+    unclaimed = [c for c in found if c.get("code") == "unclaimed-path"]
+    if unclaimed:
+        u = unclaimed[0]
+        why = (f"this session has not claimed {u.get('detail', 'these files')}. This repo "
+               "shares its checkout on purpose, so two sessions can have edited the same file, "
+               "and an explicit commit of it would carry both sets of edits under your message. "
+               "A claim is how the gate tells your files from a peer's. Claim them, then run "
+               f"the same commit again, unchanged:\n\n    {u.get('remedy', '')}\n\n"
+               "If one of them is a file a peer may also have edited, ask it first rather than "
+               "claiming over it")
+        if any(c.get("code") == "unoriented" for c in found):
+            why += (". This session has registered no charter and no claims at all, which "
+                    "usually means the session-coord skill was not loaded: load it, and follow "
+                    "'Say who you are, what you are for, and what you will write'")
+        return why
     if form.bare_commit:
         staged = staged_paths(root)
         if staged is None:
@@ -1200,7 +1226,32 @@ def _runs_only_after(rest):
     return True
 
 
-def _refusal(f, why, named=True):
+def _unnamed_hint(command, cwd):
+    """The specific thing that hid the tree, and the rewrite that names it.
+
+    A refusal that only says "the gate could not tell" leaves the session to guess, and the
+    guess on 2026-11-05 took two more refused commands: a `cd` followed by a multi-line `-m`
+    message, then the same commit with its paths in a shell variable.
+    """
+    here = os.path.realpath(cwd)
+    hints = []
+    if "\n" in command.strip():
+        hints.append("The command spans several lines, so a leading `cd` cannot be followed. "
+                     "Put a multi-line commit message in a file and pass `-F <file>`, so the "
+                     "command fits on one line")
+    if "$" in command:
+        hints.append("A path or directory is in a shell variable. Write it out literally")
+    if re.search(r"\b(bash|sh|zsh)\s+-c\b", command):
+        hints.append("The git command is inside `bash -c`. Run it directly")
+    if not hints:
+        return ""
+    return (" ".join(h + "." for h in hints) + "\n\nShaped like this, the gate can check it:"
+            f"\n\n    git -C {shlex.quote(here)} add -- <file> <file>\n"
+            f"    git -C {shlex.quote(here)} commit -s -F <msgfile> -- <file> <file>\n\n"
+            "(with the repo's own path in place of this session's, if it is a different repo)")
+
+
+def _refusal(f, why, named=True, hint=""):
     who = os.environ.get("SESSION_COORD_USER", "").strip() or "the user"
     others = ", ".join(str(s) for s in (f.get("sessions") or [])) or "another session"
     by_design = f.get("severity") != "block"
@@ -1221,6 +1272,8 @@ def _refusal(f, why, named=True):
             "`git -C /literal/path add <file>`, or `cd /literal/path && git ...`, and the gate "
             "checks that tree instead.\n\n"
         )
+        if hint:
+            text += hint + "\n\n"
     elif by_design:
         text += f"What this gate accepts here: {f.get('remedy', '')}\n\n"
     else:
