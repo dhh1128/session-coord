@@ -565,6 +565,30 @@ def _visible_text(line: str) -> str:
     return _OTHER_ESCAPE.sub("", _SGR.sub("", line))
 
 
+def _dim_after(dim: bool, params: list[str]) -> bool:
+    """Apply one SGR parameter list to the dim state, skipping colour arguments.
+
+    `38`, `48` and `58` take arguments: `5;n` for a 256-colour index, `2;r;g;b` for
+    truecolour. Read as separate codes, the `2` of `48;2;65;69;76` turned dim on, and a
+    component of 0 or 22 turned it off. Codex draws its composer on exactly such a background,
+    so text typed there read as dim placeholder and an occupied composer looked idle
+    (2026-11-06 handoff, V11).
+    """
+    i = 0
+    while i < len(params):
+        param = params[i]
+        if param in ("38", "48", "58") and i + 1 < len(params):
+            kind = params[i + 1]
+            i += 2 + (1 if kind == "5" else 3 if kind == "2" else 0)
+            continue
+        if param == "2":
+            dim = True
+        elif param in ("0", "", "22"):
+            dim = False
+        i += 1
+    return dim
+
+
 def _typed_text(line: str) -> str:
     """The line with escapes removed and every run rendered DIM dropped: what was typed.
 
@@ -575,11 +599,7 @@ def _typed_text(line: str) -> str:
     for match in _SGR.finditer(line):
         if not dim:
             out.append(line[pos:match.start()])
-        for param in (match.group(1) or "0").split(";"):
-            if param == "2":
-                dim = True
-            elif param in ("0", "", "22"):
-                dim = False
+        dim = _dim_after(dim, (match.group(1) or "0").split(";"))
         pos = match.end()
     if not dim:
         out.append(line[pos:])

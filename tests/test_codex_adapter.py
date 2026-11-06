@@ -535,3 +535,19 @@ def test_installer_quotes_absolute_runtime_and_toml_controls(tmp_path, monkeypat
                           ("SessionEnd", "session-coord-codex-end")):
         command = parsed["hooks"][event][0]["hooks"][0]["command"]
         assert shlex.split(command) == [str((tmp_path / runtime / "hooks" / script).resolve())]
+
+
+@pytest.mark.parametrize("line,typed", [
+    # The Codex composer as captured on 2026-11-06: a truecolour background, then dim
+    # placeholder text. Only the glyph and the space are typed.
+    ("\x1b[1m›\x1b[0m\x1b[48;2;65;69;76m \x1b[2mAsk Codex to do anything\x1b[0m", "› "),
+    # Real text typed on that background is not dim: the old parser read the 2 of 48;2 as dim.
+    ("\x1b[1m›\x1b[0m\x1b[48;2;65;69;76m hello there\x1b[0m", "› hello there"),
+    # A colour component of 0 must not end dim: the placeholder stays dropped.
+    ("› \x1b[2mplaceholder\x1b[38;2;0;0;0m still dim\x1b[0m", "› "),
+    # 256-colour form, as Claude Code draws its prompt glyph.
+    ("\x1b[38;5;246m❯\xa0\x1b[39m", "❯\xa0"),
+    ("\x1b[38;5;2mgreen, not dim\x1b[0m", "green, not dim"),
+])
+def test_sgr_colour_arguments_are_not_read_as_dim(line, typed):
+    assert tmuxio._typed_text(line) == typed
