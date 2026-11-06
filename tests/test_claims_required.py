@@ -36,7 +36,7 @@ class TestUnclaimedPaths:
         found = detect.unclaimed_paths(board, TREE, "me", ["a.md", "b.md", "my notes.md"])
         assert codes(found) == ["unclaimed-path"]
         assert found[0].detail == "b.md my notes.md"
-        assert found[0].remedy == "session-coord claim -- b.md 'my notes.md'"
+        assert found[0].remedy == "session-coord claim --repo /repo -- b.md 'my notes.md'"
 
     def test_a_peers_claim_does_not_count_as_mine(self):
         board = Board.of(TREE, [rec(charter="x"), rec("peer", claims=("a.md",), pane="%2")])
@@ -45,6 +45,35 @@ class TestUnclaimedPaths:
     def test_an_absolute_claim_inside_the_tree_counts(self):
         board = Board.of(TREE, [rec(claims=(f"{TREE}/a.md",))])
         assert detect.unclaimed_paths(board, TREE, "me", ["a.md"]) == []
+
+    @pytest.mark.parametrize("claim,path", [
+        ("README.md", "readme.md"),
+        ("notes.md ", "notes.md"),
+        ("docs/owned.md", "docs"),
+        ("docs/*.md", "docs/deep/x.md"),
+        ("*.md", "sub/x.md"),
+        ("a[!b].md", "ab.md"),
+    ])
+    def test_a_claim_owns_only_what_it_names(self, claim, path):
+        # Hostile pass on #10, finding 1: the peer matcher's leniency is a fail-open here.
+        board = Board.of(TREE, [rec(claims=(claim,), charter="x")])
+        assert codes(detect.unclaimed_paths(board, TREE, "me", [path])) == ["unclaimed-path"]
+
+    @pytest.mark.parametrize("claim,path", [
+        ("docs", "docs/a.md"), ("docs/", "docs/a.md"), ("docs/**", "docs/x/y.md"),
+        ("docs/*.md", "docs/y.md"), ("**/*.md", "sub/x.md"), ("a[bc].md", "ab.md"),
+    ])
+    def test_and_does_own_what_it_names(self, claim, path):
+        board = Board.of(TREE, [rec(claims=(claim,), charter="x")])
+        assert detect.unclaimed_paths(board, TREE, "me", [path]) == []
+
+    def test_with_no_record_in_this_tree_the_remedy_registers_here(self):
+        # Hostile pass on #10, finding 2: `git -C /other ...` must not be told to claim in
+        # the repo the session happens to sit in.
+        board = Board.of(TREE, [])
+        found = detect.unclaimed_paths(board, TREE, "sid-1", ["a.md"])
+        assert found[0].remedy == ("session-coord register --repo /repo --cwd /repo "
+                                   "--session sid-1 --claim a.md")
 
     def test_a_session_with_nothing_registered_is_marked_unoriented(self):
         board = Board.of(TREE, [rec()])
