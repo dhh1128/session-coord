@@ -284,3 +284,14 @@ def test_inbox_session_survives_a_non_string_title(world):
                               "title": 42})
     world.setattr(cli.store, "load_all", lambda repo: [bad])
     assert cli._resolve_session_arg(REPO, "anything")[0] is None
+
+
+def test_an_id_prefix_does_not_outrank_an_alias(world):
+    # Hostile fix-diff pass on #14: an untitled session's name is its id prefix.
+    world.setattr(cli, "_live_table", lambda: None)
+    world.setattr(cli.store, "load_all", lambda repo: [
+        Presence(session_id="a1-owner", repo_root=REPO, workdir=REPO, title="abcd1234",
+                 named=True),
+        Presence(session_id="abcd1234-other", repo_root=REPO, workdir=REPO)])
+    resolved, why = cli._resolve_session_arg(REPO, "abcd1234")
+    assert resolved is None and "matches 2 sessions" in why

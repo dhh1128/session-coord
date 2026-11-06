@@ -1514,7 +1514,10 @@ def _resolve_session_arg(repo: str, given: str) -> tuple[str | None, str]:
 
     def named(fields) -> bool:
         return bool(key) and key in {_held_key(n) for n in fields if isinstance(n, str) and n}
-    by_name = ([p for p in live if named((p.name, p.title))]
+    # The title, never `p.name`: for an untitled session that is its id prefix, which then
+    # outranked another session's alias. An id prefix is matched below, beside the names, so
+    # such a collision refuses as ambiguous (hostile fix-diff pass on #14).
+    by_name = ([p for p in live if named((p.title,))]
                or [p for p in live if named((p.registered_name,))])
     # A record whose id is not a string is damage on disk, not a session; skip it rather than
     # crash the one command a session uses to read its mail (hostile pass on #14).
