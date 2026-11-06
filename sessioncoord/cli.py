@@ -1118,7 +1118,14 @@ def cmd_inbox(args) -> int:
             if held:
                 held, expired = store.unexpired_held(held)
                 if expired:
-                    store.save_held(held)
+                    # Cleanup is housekeeping. A failed write must not stand between a
+                    # session and its own mail, so say so and deliver anyway; the next read
+                    # tries again (hostile pass at edcad05, finding 1).
+                    try:
+                        store.save_held(held)
+                    except OSError as e:
+                        print(f"session-coord: could not prune expired held mail: {e}",
+                              file=sys.stderr)
             # Saving the inbox first means a crash between the two writes can repeat a
             # message, but cannot lose it; the next read recognizes its id and finishes
             # removing it from held mail. Moving on peek leaves it unread for the hook's

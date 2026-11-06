@@ -370,3 +370,18 @@ def test_expired_held_mail_is_never_delivered_to_its_name(estate, capsys):
     assert cli.main(["inbox", "--repo", OTHER]) == 0
     assert "body old" not in capsys.readouterr().out
     assert store.load_inbox(OTHER) == [] and store.load_held() == []
+
+
+def test_a_failed_prune_does_not_block_the_sessions_own_inbox(estate, capsys):
+    store.save_held([_held("old", "2026-10-13T00:00:00+00:00", "someone-gone")])
+    store.save_inbox(SENDER, [inbox.Message(id="normal", sender="peer",
+                                            recipient="sender", body="normal mail")])
+
+    def refuse(messages):
+        raise PermissionError("read-only state")
+
+    estate.setattr(store, "save_held", refuse)
+    assert cli.main(["inbox", "--repo", SENDER]) == 0
+    out = capsys.readouterr()
+    assert "normal mail" in out.out
+    assert "could not prune expired held mail" in out.err
