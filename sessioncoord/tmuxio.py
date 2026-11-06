@@ -376,6 +376,45 @@ def pane_of_title(title: str, run: Runner = _run) -> str | None:
     return hits[0] if hits else None
 
 
+def window_names(run: Runner = _run) -> dict[str, str] | None:
+    """Each pane's tmux WINDOW name, keyed by pane id. None when tmux could not be asked.
+
+    Read separately from `panes`, whose row shape callers and tests depend on. A window name
+    is what Daniel and launching sessions call a worker ("codex-p2v1", from `new-window -n`),
+    and before this `msg codex-p2v1` answered "no pane matches" (2026-11-06 handoff, V9).
+    """
+    out = run(["tmux", "list-panes", "-a", "-F", "#{pane_id}	#{window_name}"])
+    if out is None:
+        return None
+    names = {}
+    for line in out.splitlines():
+        pane, _, name = line.partition("	")
+        if pane:
+            names[pane] = name
+    return names
+
+
+def pane_of_window_name(name: str, run: Runner = _run) -> str | None:
+    """The single engine pane in a window called `name` (case-insensitive), or None.
+
+    Raises `AmbiguousTarget` when two such panes exist, in one split window or in two windows
+    sharing a name, for `pane_of_window`'s reason.
+    """
+    want = (name or "").strip().lower()
+    table = panes(run)
+    names = window_names(run) if table else None
+    if not want or not table or not names:
+        return None
+    hits = [pane for pane, info in table.items()
+            if info["claude_pid"] is not None and names.get(pane, "").strip().lower() == want]
+    if len(hits) > 1:
+        raise AmbiguousTarget(
+            f"{name!r} is the window of {len(hits)} sessions ({', '.join(sorted(hits))}). "
+            "Address a pane id or a session id instead."
+        )
+    return hits[0] if hits else None
+
+
 def claude_pids(run: Runner = _run) -> dict[str, int | None | _UnknownPid] | None:
     """The liveness map, or None when tmux could not be consulted. See `liveness.PaneMap`."""
     table = panes(run)
@@ -526,6 +565,30 @@ def _visible_text(line: str) -> str:
     return _OTHER_ESCAPE.sub("", _SGR.sub("", line))
 
 
+def _dim_after(dim: bool, params: list[str]) -> bool:
+    """Apply one SGR parameter list to the dim state, skipping colour arguments.
+
+    `38`, `48` and `58` take arguments: `5;n` for a 256-colour index, `2;r;g;b` for
+    truecolour. Read as separate codes, the `2` of `48;2;65;69;76` turned dim on, and a
+    component of 0 or 22 turned it off. Codex draws its composer on exactly such a background,
+    so text typed there read as dim placeholder and an occupied composer looked idle
+    (2026-11-06 handoff, V11).
+    """
+    i = 0
+    while i < len(params):
+        param = params[i]
+        if param in ("38", "48", "58") and i + 1 < len(params):
+            kind = params[i + 1]
+            i += 2 + (1 if kind == "5" else 3 if kind == "2" else 0)
+            continue
+        if param == "2":
+            dim = True
+        elif param in ("0", "", "22"):
+            dim = False
+        i += 1
+    return dim
+
+
 def _typed_text(line: str) -> str:
     """The line with escapes removed and every run rendered DIM dropped: what was typed.
 
@@ -536,11 +599,7 @@ def _typed_text(line: str) -> str:
     for match in _SGR.finditer(line):
         if not dim:
             out.append(line[pos:match.start()])
-        for param in (match.group(1) or "0").split(";"):
-            if param == "2":
-                dim = True
-            elif param in ("0", "", "22"):
-                dim = False
+        dim = _dim_after(dim, (match.group(1) or "0").split(";"))
         pos = match.end()
     if not dim:
         out.append(line[pos:])
@@ -643,6 +702,76 @@ def spill(text: str, sender: str = "") -> str:
     return name
 
 
+def _resolve(target: str, run: Runner, expect_pid: int | None) -> tuple[str, str]:
+    table = panes(run)
+    if table is None:
+        raise SendRefused("tmux could not be consulted; nothing was sent.")
+    try:
+        pane = target if target in table else pane_of_window(target, run)
+        if pane is None:
+            # A title and a window name are both names a person chose, so neither outranks the
+            # other: one pane's title equal to another pane's window name names two sessions
+            # (hostile pass on #14).
+            by_title = pane_of_title(target, run)
+            by_window = pane_of_window_name(target, run)
+            if by_title and by_window and by_title != by_window:
+                raise AmbiguousTarget(
+                    f"{target!r} is the title of {by_title} and the window of {by_window}. "
+                    "Address a pane id or a session id instead.")
+            pane = by_title or by_window
+    except AmbiguousTarget as e:
+        raise SendRefused(f"{e} Nothing was sent.") from None
+    if pane is None or pane not in table:
+        raise SendRefused(f"no pane matches {target!r}; nothing was sent.")
+    live = table[pane]["claude_pid"]
+    engine = table[pane].get("engine", "claude")
+    if live is UNKNOWN_PID:
+        raise SendRefused(f"{target} process could not be read; nothing was sent.")
+    if live is None:
+        raise SendRefused(
+            f"{target} holds no Claude session or Codex session -- it is a plain shell, and "
+            "sending would execute the message as a command. Nothing was sent."
+        )
+    if engine not in ("claude", "codex"):
+        raise SendRefused(f"{target} engine could not be read; nothing was sent.")
+    if expect_pid is not None and live != expect_pid:
+        raise SendRefused(
+            f"{target} now holds session pid {live}, not the {expect_pid} this message was "
+            "addressed to. Pane ids are reused; nothing was sent."
+        )
+    return pane, engine
+
+
+def _refuse_if_busy(target: str, pane: str, engine: str, run: Runner, force: bool) -> None:
+    state = _codex_prompt_state(pane, run) if engine == "codex" else None
+    busy = (None if state is None else state != "idle") if engine == "codex" else prompt_is_busy(pane, run)
+    if not force and engine == "codex" and state is None:
+        raise SendRefused(f"{target} Codex prompt could not be read; nothing was sent.")
+    if not force and state == "working":
+        raise SendRefused(f"{target} is working on a turn; nothing was typed. Retry when it is idle.")
+    if not force and busy is True:
+        raise SendRefused(
+            f"{target} has unsubmitted text in its prompt -- somebody is typing there. Sending "
+            "now would append this message to their sentence and submit both as one turn. "
+            "Retry shortly, or write the detail to a file and send the path when they are idle."
+        )
+
+
+def preflight(target: str, run: Runner = _run, expect_pid: int | None = None,
+              force: bool = False) -> str:
+    """Every check `send` makes before it types, and nothing else. Returns the pane.
+
+    Raises `SendRefused` exactly where `send` would refuse WITHOUT typing, so a caller can
+    learn that before it spends anything. `msg` charges the doorbell budget on attempt, for the
+    reasons at `cli._Doorbell`; running this first means a pane that is mid-turn or holds no
+    session costs nothing. Two refused rings to a busy Codex pane spent two thirds of an hour's
+    budget on 2026-11-06 (handoff V7). `send` makes the same checks again before it types.
+    """
+    pane, engine = _resolve(target, run, expect_pid)
+    _refuse_if_busy(target, pane, engine, run, force)
+    return pane
+
+
 def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = None,
          sender: str = "", force: bool = False, spill_over: int = INLINE_LIMIT) -> str:
     """Type `text` into another session's prompt and submit it.
@@ -693,33 +822,7 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
         text = f" {SIGIL} {text}"
 
     def resolve() -> tuple[str, str]:
-        table = panes(run)
-        if table is None:
-            raise SendRefused("tmux could not be consulted; nothing was sent.")
-        try:
-            pane = target if target in table else (
-                pane_of_window(target, run) or pane_of_title(target, run))
-        except AmbiguousTarget as e:
-            raise SendRefused(f"{e} Nothing was sent.") from None
-        if pane is None or pane not in table:
-            raise SendRefused(f"no pane matches {target!r}; nothing was sent.")
-        live = table[pane]["claude_pid"]
-        engine = table[pane].get("engine", "claude")
-        if live is UNKNOWN_PID:
-            raise SendRefused(f"{target} process could not be read; nothing was sent.")
-        if live is None:
-            raise SendRefused(
-                f"{target} holds no Claude session or Codex session -- it is a plain shell, and "
-                "sending would execute the message as a command. Nothing was sent."
-            )
-        if engine not in ("claude", "codex"):
-            raise SendRefused(f"{target} engine could not be read; nothing was sent.")
-        if expect_pid is not None and live != expect_pid:
-            raise SendRefused(
-                f"{target} now holds session pid {live}, not the {expect_pid} this message was "
-                "addressed to. Pane ids are reused; nothing was sent."
-            )
-        return pane, engine
+        return _resolve(target, run, expect_pid)
 
     _, first_engine = resolve()
     # Re-resolve as late as possible AND use that answer as the destination. Discarding it was
@@ -739,18 +842,7 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
     # change under us, and failing closed there would silently kill inter-session messaging on
     # the next Claude Code release -- a worse outcome than an occasional collision, which the
     # attribution prefix at least makes legible. Refuse only on a positive observation.
-    state = _codex_prompt_state(pane, run) if engine == "codex" else None
-    busy = (None if state is None else state != "idle") if engine == "codex" else prompt_is_busy(pane, run)
-    if not force and engine == "codex" and state is None:
-        raise SendRefused(f"{target} Codex prompt could not be read; nothing was sent.")
-    if not force and state == "working":
-        raise SendRefused(f"{target} is working on a turn; nothing was typed. Retry when it is idle.")
-    if not force and busy is True:
-        raise SendRefused(
-            f"{target} has unsubmitted text in its prompt -- somebody is typing there. Sending "
-            "now would append this message to their sentence and submit both as one turn. "
-            "Retry shortly, or write the detail to a file and send the path when they are idle."
-        )
+    _refuse_if_busy(target, pane, engine, run, force)
     if run(["tmux", "send-keys", "-t", pane, "-l", "--", text]) is None:
         raise SendRefused(f"tmux refused to type into {pane}; nothing was sent.")
     if run(["tmux", "send-keys", "-t", pane, "Enter"]) is None:

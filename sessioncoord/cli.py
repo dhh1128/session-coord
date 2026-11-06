@@ -149,7 +149,12 @@ def _render_board(board: Board) -> str:
         git = board.facts is None or board.facts.is_git
         branch = f"  ({s.branch or 'detached'})" if git else ""
         lines.append(f"  {s.label:<14} {where}{branch}{role}")
-        lines.append(f"      address as: {s.name}")
+        # The registered name is shown beside a live title that replaced it. Codex retitles its
+        # pane per task, so a worker registered as "codex-p2v1" showed only "Read brief and
+        # send arguments | ..." and `board | grep codex-p2v1` found nothing (2026-11-06).
+        alias = (f"  (or {s.registered_name})"
+                 if s.registered_name and s.registered_name != s.name else "")
+        lines.append(f"      address as: {s.name}{alias}")
         if s.charter:
             lines.append(f"      {s.charter}")
         if s.claims:
@@ -774,6 +779,10 @@ class _Doorbell:
     # It costs a sender one doorbell an hour when a peer is unreachable. That is visible in the
     # log and self-correcting within the hour, which is the direction this module has learned
     # to fail in.
+    #
+    # The cheap half of a refund came back without a refund: `msg` runs `tmuxio.preflight`
+    # BEFORE reserving, and a refusal there has typed nothing, so nothing is charged. Only a
+    # refusal that `send` itself raises after the preflight passed is charged (2026-11-06).
 
     def tail(self):
         if self.charge is None:
@@ -976,6 +985,30 @@ def cmd_msg(args) -> int:
             hits, recipient_repo = search(primary)
         if not hits:
             hits, recipient_repo = search(alias)
+        # A tmux WINDOW name: what a launching session called its worker. Without it a
+        # registered peer addressed by window name fell to the unregistered path and was typed
+        # at rather than filed (2026-11-06 handoff, V9). It is resolved over EVERY engine pane,
+        # registered or not, so a name two panes share refuses instead of picking the one that
+        # happens to be registered; and a name that is one pane's title and another pane's
+        # window names two sessions, so that refuses too (hostile pass on #14).
+        named_by = {p.pane for p in hits}
+        loose = by_name and table is not None and not any(
+            args.target in (p.pane, p.window, p.session_id) for p in hits)
+        if loose:
+            try:
+                wpane = tmuxio.pane_of_window_name(args.target)
+            except tmuxio.AmbiguousTarget as e:
+                print(f"session-coord: {e} Nothing was filed and nothing was sent.",
+                      file=sys.stderr)
+                return 2
+            if wpane and hits and wpane not in named_by:
+                print(f"session-coord: {args.target!r} is the name of one session and the tmux "
+                      f"window of another ({wpane}), so it does not name one. Nothing was filed "
+                      "and nothing was sent; address a pane id or a session id.",
+                      file=sys.stderr)
+                return 2
+            if wpane and not hits:
+                hits, recipient_repo = search(lambda p: p.pane == wpane)
         if len(hits) > 1:
             where = ", ".join(sorted(f"{p.repo_root}: {p.session_id} ({p.pane})"
                                      for p in hits))
@@ -1106,6 +1139,14 @@ def cmd_msg(args) -> int:
         # until it looks; ringing makes it spend a turn reading and usually another replying.
         # So what is rationed is interrupting a peer -- a far narrower claim than telling one
         # something -- and an over-budget message is still delivered, just quietly.
+        # Checked before the budget is taken: a pane that is mid-turn, or holds no session,
+        # refuses without typing anything, and that should not cost a doorbell (handoff V7).
+        try:
+            tmuxio.preflight(target, expect_pid=expect, force=args.force)
+        except tmuxio.SendRefused as e:
+            print(f"filed for {recipient.label}, but the doorbell could not be rung (no "
+                  f"doorbell was charged): {e}", file=sys.stderr)
+            return 0
         bell = _Doorbell(repo, sender_id, args.target, reply, override)
         refused = bell.reserve()
         if refused:
@@ -1130,15 +1171,28 @@ def cmd_msg(args) -> int:
     # addresses can be recycled, so holding mail under either could give it to another process.
     # A successful direct send must not also be filed: that would put the same message in two turns.
     bell = _Doorbell(repo, sender_id, args.target, reply, override)
-    refused = ("the sender's doorbell budget is spent" if getattr(args, "no_ring", False)
-               else bell.reserve())
+    refused = None
+    if getattr(args, "no_ring", False):
+        refused = "the sender's doorbell budget is spent"
+    else:
+        # Before the budget, for the same reason as the registered path above (handoff V7).
+        try:
+            tmuxio.preflight(target, expect_pid=expect, force=args.force)
+        except tmuxio.SendRefused as e:
+            refused = str(e)
+    if refused is None:
+        refused = bell.reserve()
     if not refused:
         try:
             pane = tmuxio.send(target, comms.compose(args.text, reply), expect_pid=expect,
                                sender=sender, force=args.force)
         except tmuxio.SendUnknown as e:
             # Typing may have delivered this turn. Holding a second copy would risk duplication.
-            print(f"session-coord: send outcome unknown; nothing was filed: {e}",
+            # Say where the text is: a Codex composer has been seen holding it unsubmitted, and
+            # "nothing was filed" alone read as "nothing happened" (handoff, addendum 2).
+            print(f"session-coord: send outcome unknown; nothing was filed: {e}\n"
+                  "  The text was typed into that pane and may be sitting unsubmitted in its "
+                  "prompt. Look at the pane before resending; resending may deliver it twice.",
                   file=sys.stderr)
             return 2
         except tmuxio.SendRefused as e:
@@ -1187,9 +1241,15 @@ def cmd_msg(args) -> int:
         print(f"session-coord: {e}", file=sys.stderr)
         return 75
     hours = int(store.HELD_TTL.total_seconds() // 3600)
-    print(f"held for {args.target}; it will be delivered at the start of the next turn of "
-          f"a session with that name, if one takes a turn within {hours} hours, and dropped "
-          f"after that ({refused})")
+    # The outcome first and on its own line, then only the first line of why it was held. The
+    # reason used to follow in parentheses, and a budget refusal is many lines ending in
+    # --override advice, so `| tail -3` showed only that advice: a successful hold read as a
+    # failure and was sent again, and the peer got the message three times (handoff V8).
+    print(f"held for {args.target}: it will be delivered at the start of the next turn of a "
+          f"session with that name, if one takes a turn within {hours} hours, and dropped "
+          "after that. Do not resend it.")
+    why = (refused or "").strip().splitlines()
+    print(f"  (not typed directly: {why[0] if why else 'no reason given'})")
     return 0
 
 
@@ -1427,6 +1487,61 @@ def _held_names(p: Presence) -> set[str]:
                               _held_key(p.session_id)) if name}
 
 
+_SESSION_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                         r"[0-9a-fA-F]{12}$")
+
+
+def _resolve_session_arg(repo: str, given: str) -> tuple[str | None, str]:
+    """Turn `inbox --session` into a session id, or say why it cannot.
+
+    It used to be taken verbatim as the recipient. `--session codex-p2v1` (a name) and
+    `--session 01a1b1af` (an id prefix, what the board prints for an unnamed session) both
+    named nobody and printed "Inbox empty" while mail sat held for that name (2026-11-06). A
+    full session id with no record yet is still accepted: the hook passes its payload's id
+    before the session has registered, and mail can already be waiting under it.
+    """
+    records = store.load_all(repo)
+    if any(p.session_id == given for p in records):
+        return given, ""
+    records = [p for p in records if isinstance(p.session_id, str)]
+    live = _live(records)
+    # Names compare as `msg` and held mail compare them, through `_held_key` (case, and a
+    # leading status glyph), so an address that works for `msg` works here (Copilot on #14).
+    # And in msg's ORDER: a current title outranks another session's registered alias, so the
+    # address a message was sent to reads the inbox it went to. Non-string names are damage on
+    # disk and match nothing (hostile fix-diff pass on #14).
+    key = _held_key(given)
+
+    def named(fields) -> bool:
+        return bool(key) and key in {_held_key(n) for n in fields if isinstance(n, str) and n}
+    # The title, never `p.name`: for an untitled session that is its id prefix, which then
+    # outranked another session's alias. An id prefix is matched below, beside the names, so
+    # such a collision refuses as ambiguous (hostile fix-diff pass on #14).
+    by_name = ([p for p in live if named((p.title,))]
+               or [p for p in live if named((p.registered_name,))])
+    # A record whose id is not a string is damage on disk, not a session; skip it rather than
+    # crash the one command a session uses to read its mail (hostile pass on #14).
+    by_prefix = [p for p in records if len(given) >= 8 and isinstance(p.session_id, str)
+                 and p.session_id.startswith(given)]
+    found = {p.session_id for p in by_name + by_prefix}
+    if len(found) == 1:
+        return found.pop(), ""
+    if len(found) > 1:
+        return None, (f"'{given}' matches {len(found)} sessions here; pass the full session "
+                      "id (`board --json` lists them).")
+    if _SESSION_ID.match(given):
+        return given, ""
+    try:
+        waiting = sum(1 for m in store.load_held() if m.recipient == key and not m.read)
+    except store.UnreadableQueue:
+        waiting = 0
+    hint = (f" {waiting} held message(s) are waiting for that name; they are delivered when a "
+            "live session registered under it next reads its inbox." if waiting else "")
+    return None, (f"no live session here is called or starts with '{given}', so its inbox "
+                  f"cannot be read.{hint} Register first (`session-coord register --name "
+                  f"...`), then run `inbox` with no --session.")
+
+
 def cmd_inbox(args) -> int:
     """Drain this session's unread messages.
 
@@ -1443,6 +1558,12 @@ def cmd_inbox(args) -> int:
         print("session-coord: cannot tell which session this is; pass --session.",
               file=sys.stderr)
         return 2
+    if args.session:
+        resolved, why = _resolve_session_arg(repo, args.session)
+        if resolved is None:
+            print(f"session-coord: {why}", file=sys.stderr)
+            return 2
+        who = resolved
     try:
         held = store.load_held()
     except store.UnreadableQueue as e:

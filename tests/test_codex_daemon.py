@@ -97,6 +97,9 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.tmuxio, "panes", lambda run=None: None)
     monkeypatch.setattr(cli.procio, "claude_ancestor", lambda pid=None: None)
     monkeypatch.setattr(cli.procio, "start_of", lambda pid: f"t{pid}")
+    # Every pid in these tests is a Codex TUI unless a test says otherwise; the real /proc
+    # answer for these numbers depends on what the box is running today.
+    monkeypatch.setattr(cli.procio, "argv_of", lambda pid: ["/opt/bin/codex"])
     monkeypatch.setattr(cli.procio, "starts", lambda pids: {p: f"t{p}" for p in pids})
     return tmp_path
 
@@ -133,6 +136,11 @@ def test_me_under_daemon_ignores_the_daemons_pane(world, monkeypatch):
 
 def test_register_refuses_a_pid_the_pane_scan_contradicts(world, monkeypatch, capsys):
     # 16:34:53: `--pid 1341681` named the npm launcher; the pane scan finds the native TUI.
+    # Both argvs are given here: these pids were real on kelun, and a test that reads the real
+    # /proc for them passes or fails with whatever holds those numbers today.
+    monkeypatch.setattr(procio, "argv_of", lambda pid: {
+        1341681: ["node", "/home/u/.nvm/bin/codex"],
+        1341719: ["/home/u/.nvm/lib/node_modules/@openai/codex/vendor/bin/codex"]}.get(pid))
     monkeypatch.setattr(cli.tmuxio, "panes", lambda run=None: {
         "%183": {"pane": "%183", "window": "tessera:7", "path": "/w", "title": "t",
                  "claude_pid": 1341719, "engine": "codex"}})

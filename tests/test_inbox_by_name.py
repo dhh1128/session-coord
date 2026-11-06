@@ -64,7 +64,12 @@ def test_unregistered_over_budget_is_held(estate, capsys):
     assert cli.main(["msg", "--repo", SENDER, "✳ Foreman-Imbu", "wait for me"]) == 0
     assert [(m.recipient, m.body) for m in store.load_held()] == [
         ("foreman-imbu", "wait for me")]
-    assert "held for" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "held for" in out
+    # The outcome survives `| tail -3`: a multi-line budget refusal used to follow it and push
+    # it off, and the sender resent a message that had been held (handoff V8).
+    assert out.strip().splitlines()[0].startswith("held for")
+    assert len(out.strip().splitlines()) == 2 and "--override" not in out
 
 
 def test_unregistered_success_is_typed_only(estate):
@@ -84,6 +89,7 @@ def test_unknown_direct_send_is_not_held_or_reported_delivered(estate, capsys):
     err = capsys.readouterr().err
     assert "send outcome unknown" in err
     assert "nothing was filed" in err
+    assert "may be sitting unsubmitted" in err
 
 
 @pytest.mark.parametrize("target", ["%9", "other:2"])

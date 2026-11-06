@@ -11,6 +11,7 @@ import time
 
 import pytest
 from sessioncoord import cli, comms, store
+from sessioncoord.tmuxio import preflight as _REAL_PREFLIGHT  # before conftest stubs it
 from sessioncoord.model import Presence
 
 
@@ -384,6 +385,47 @@ class TestCheckSurvivesADamagedBudgetLog:
             store._sends_path("/repo").chmod(0o644)
         assert rc in (0, 1, 2), "check must return a finding code, not raise"
         assert "budget: unavailable" in capsys.readouterr().out
+
+class TestARefusalThatTypesNothingIsNotCharged:
+    """2026-11-06 handoff V7: two refused rings to a busy Codex pane spent two of three
+    doorbells, and the retry loop then ran on budget refusals that looked like busy ones.
+    `preflight` runs `send`'s no-typing checks before the charge; a refusal there is free."""
+
+    def refuse(self, monkeypatch):
+        def no(*a, **kw):
+            raise cli.tmuxio.SendRefused("%9 is working on a turn; nothing was typed.")
+        monkeypatch.setattr(cli.tmuxio, "preflight", no)
+
+    def test_registered_recipient(self, home, fake_world, monkeypatch, capsys):
+        pair()
+        self.refuse(monkeypatch)
+        monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **kw: pytest.fail("typed anyway"))
+        assert send("busy peer") == 0
+        assert "no doorbell was charged" in capsys.readouterr().err
+        assert store.load_sends("/repo") == []
+        assert [m.body for m in store.load_inbox("/repo")] == ["busy peer"]
+
+    def test_unregistered_target(self, home, fake_world, monkeypatch, rings, capsys):
+        reg("sender", "%1", 111, "me:1")
+        self.refuse(monkeypatch)
+        assert cli.main(["msg", "%9", "hello", "--repo", "/repo"]) == 2
+        assert rings == [] and store.load_sends("/repo") == []
+
+    def test_the_real_preflight_types_nothing(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(cli.tmuxio, "panes", lambda run=None: {
+            "%3": {"pane": "%3", "window": "w:1", "path": "/r", "title": "t",
+                   "claude_pid": 30, "engine": "codex"}})
+
+        def run(argv):
+            calls.append(argv)
+            if argv[1] == "capture-pane":
+                return "• Working (12s • esc to interrupt)\n›  \n"
+            return "ok"
+        with pytest.raises(cli.tmuxio.SendRefused, match="is working"):
+            _REAL_PREFLIGHT("%3", run)
+        assert not any(a[1] == "send-keys" for a in calls)
+
 
 class TestTheDirectPathIsBudgetedToo:
     """Copilot, PR #12: the limit lived only in the inbox branch, so addressing an
