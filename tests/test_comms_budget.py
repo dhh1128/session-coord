@@ -568,6 +568,16 @@ class TestAcknowledgingOnlyWhatWasDelivered:
         assert out.startswith(cli.IDS_PREFIX + "m1")
         assert "first" in out, "the bodies ride with the ids, not in a second call"
         assert store.load_inbox("/repo")[0].read is False
+        # The hook acknowledges this snapshot right after delivering it, so the footer its
+        # reader sees must not say "Still unread" (sumago, 2026-11-06).
+        assert "Still unread" not in out and "will not normally list them again" in out
+
+    def test_an_empty_inbox_points_at_mail_the_hook_delivered(self, home, fake_world, rings,
+                                                             capsys):
+        pair()
+        assert cli.main(["inbox", "--repo", "/repo", "--session", "peer"]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith("Inbox empty.") and "start-of-turn hook" in out
 
 class TestAClearStrandsMailAndThatIsKnown:
     """The rebind that used to live here was removed; see cli._register_locked.

@@ -315,3 +315,8 @@ Not done. A same-branch-on-two-boxes finding, which needs the remote view inside
 
 The four test failures that appeared only on macOS were fixed on the same branch. Two compared a path that the code had passed through `realpath` against a literal `/home/...`, and on macOS `/home` resolves to `/System/Volumes/Data/home`. The two Codex hook tests took the first subprocess call as the register call; without `/proc` the hook first asks `ps` about the Codex process.
 
+## The mail hook's footer, 2026-11-06
+
+On sumago two sessions spent several turns convinced messages had gone missing. The receiver's doorbell typed `session-coord inbox`. Submitting it fired the mail hook, which delivered the mail into the turn and then acknowledged it, so when the session ran `inbox` as told it got "Inbox empty". The delivered text itself ended "Still unread -- this was a peek", because the hook renders with `--peek` and acknowledges afterwards, so the one line that could have explained it said the opposite. The receiver told its peer it had received nothing, and the peer resent. Nothing was lost.
+
+`inbox --ids`, whose only caller is the hook, now renders a footer saying the mail is delivered and marked read and will not be listed again. An empty inbox says that mail the hook delivered is not listed, and to look in recent turns before asking for a resend. The alternative, having the hook skip delivery on a doorbell prompt so that `inbox` finds the mail, was rejected: it depends on recognising doorbell text, and a doorbell typed into a half-finished prompt would not match.

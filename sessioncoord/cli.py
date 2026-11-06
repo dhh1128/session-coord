@@ -1565,7 +1565,10 @@ def cmd_inbox(args) -> int:
                     # So the ids ride with the bodies, on a sentinel first line the caller strips.
                     # Two peeks cannot be made consistent by trying harder; there has to be one.
                     sys.stdout.write(IDS_PREFIX + " ".join(m.id for m in mine) + "\n")
-                    sys.stdout.write(inbox_mod.render(mine, marked_read=False, you=_you(repo, who)))
+                    # Only the mail hook asks for ids, and it acknowledges this snapshot right
+                    # after delivering it, so the footer describes the state its reader sees.
+                    sys.stdout.write(inbox_mod.render(mine, marked_read=False, you=_you(repo, who),
+                                                      delivered=True))
                     if ambiguous:
                         sys.stdout.write("Held mail for " + ", ".join(ambiguous) +
                                          " is ambiguous across live sessions; nothing was "
