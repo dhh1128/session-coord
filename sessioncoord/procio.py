@@ -233,14 +233,16 @@ def codex_server_above(pid: int | None = None) -> bool:
     question "is this environment mine?" cannot stop at the nearest engine (Copilot on #11).
     """
     pid = os.getpid() if pid is None else pid
-    for _ in range(32):
+    for _ in range(256):
         ppid = parent_of(pid)
         if ppid is None or ppid <= 1:
             return False
         if is_codex_server(argv_of(ppid)):
             return True
         pid = ppid
-    return False
+    # A walk that did not reach the top has not shown the environment is ours. Answering no
+    # here trusted an inherited TMUX_PANE (hostile fix-diff pass on #11, finding 2).
+    return True
 
 
 def claude_ancestor(pid: int | None = None) -> int | None:

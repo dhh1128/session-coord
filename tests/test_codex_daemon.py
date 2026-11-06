@@ -202,3 +202,31 @@ def test_no_pid_fallback_under_the_daemon(world, monkeypatch):
     _under_daemon(monkeypatch)
     monkeypatch.setenv("CODEX_SESSION_ID", "thread-7")
     assert cli._me("/w") is None
+
+
+def test_a_claude_below_the_daemon_cannot_match_the_daemons_record(world, monkeypatch):
+    # Hostile fix-diff pass on #11, finding 1: the pid fallback reached the daemon via
+    # codex_ancestor while the nearest engine was Claude.
+    store.save(Presence(session_id="first-thread", repo_root="/w", workdir="/w", pane=None,
+                        claude_pid=1352327, engine="codex", pid_started="t1352327"))
+    monkeypatch.setattr(procio, "nearest_engine", lambda pid=None: ("claude", 4000))
+    monkeypatch.setattr(procio, "codex_server_above", lambda pid=None: True)
+    monkeypatch.setattr(cli.procio, "claude_ancestor", lambda pid=None: 4000)
+    monkeypatch.setattr(cli.procio, "codex_ancestor", lambda pid=None: 1352327)
+    monkeypatch.setattr(procio, "argv_of", lambda pid: DAEMON if pid == 1352327 else ["claude"])
+    assert cli._me("/w") is None
+
+
+def test_register_refuses_the_daemon_pid(world, monkeypatch, capsys):
+    monkeypatch.setattr(procio, "argv_of", lambda pid: DAEMON if pid == 1352327 else None)
+    assert cli.main(["register", "--session", "t", "--engine", "codex",
+                     "--pid", "1352327"]) == 2
+    assert store.load_all("/w") == [] and "shared app-server daemon" in capsys.readouterr().err
+
+
+def test_an_unfinished_walk_does_not_trust_the_environment(monkeypatch):
+    # Hostile fix-diff pass on #11, finding 2: a deep tree hid the daemon past the limit.
+    monkeypatch.setattr(procio, "codex_server_above", _real_server_above)
+    monkeypatch.setattr(procio, "parent_of", lambda pid: pid + 1)
+    monkeypatch.setattr(procio, "argv_of", lambda pid: ["bash"])
+    assert procio.codex_server_above(2) is True

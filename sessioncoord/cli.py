@@ -236,6 +236,11 @@ def _register_locked(args, repo: str) -> int:
     # ancestry and TMUX_PANE both belong to the TUI that started the daemon. Detecting from
     # them recorded the daemon's pid, which liveness rejects and the next sweep deletes, so
     # the session was absent from the board while it went on sending mail (2026-11-06).
+    if args.pid is not None and procio.is_codex_server(procio.argv_of(args.pid)):
+        print(f"session-coord: not registered. {args.pid} is Codex's shared app-server daemon, "
+              "which every attached session shares; it identifies none of them. Pass the pid "
+              "of this session's own codex process.", file=sys.stderr)
+        return 2
     if (procio.under_codex_server() and args.pid is None and prior is None):
         print("session-coord: not registered. This command runs inside Codex's shared "
               "app-server daemon, so neither its process ancestry nor TMUX_PANE says which "
@@ -1302,6 +1307,11 @@ def _mine_by_pid(records) -> Presence | None:
     """
     for pid in (procio.claude_ancestor(), procio.codex_ancestor()):
         if pid is None:
+            continue
+        # The shared daemon is an ancestor of every thread attached to it, so a record naming
+        # it names none of them. Skipped wherever the caller sits, including a Claude below a
+        # daemon tool (hostile fix-diff pass on #11, finding 1).
+        if procio.is_codex_server(procio.argv_of(pid)):
             continue
         started = procio.start_of(pid)
         found = next((p for p in records if not p.pane and p.claude_pid == pid
