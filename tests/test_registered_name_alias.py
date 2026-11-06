@@ -151,3 +151,11 @@ def test_a_failed_tmux_read_is_not_repeated_per_repo(world, monkeypatch):
     calls.clear()
     cli.main(["msg", "--repo", REPO, "nobody-at-all", "hello"])
     assert len(calls) == few
+
+
+def test_the_board_shows_the_registered_name_beside_the_live_title(world, capsys):
+    # 2026-11-06: a Codex worker registered as codex-p2v1 was invisible to `board | grep`.
+    world.setattr(cli.tmuxio, "claude_pids", lambda run=None: {"%2": 2})
+    assert cli.main(["board", "--repo", REPO]) == 0
+    out = capsys.readouterr().out
+    assert "address as: PR1685-attribs brief  (or pr1685-attribs)" in out

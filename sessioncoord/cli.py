@@ -149,7 +149,12 @@ def _render_board(board: Board) -> str:
         git = board.facts is None or board.facts.is_git
         branch = f"  ({s.branch or 'detached'})" if git else ""
         lines.append(f"  {s.label:<14} {where}{branch}{role}")
-        lines.append(f"      address as: {s.name}")
+        # The registered name is shown beside a live title that replaced it. Codex retitles its
+        # pane per task, so a worker registered as "codex-p2v1" showed only "Read brief and
+        # send arguments | ..." and `board | grep codex-p2v1` found nothing (2026-11-06).
+        alias = (f"  (or {s.registered_name})"
+                 if s.registered_name and s.registered_name != s.name else "")
+        lines.append(f"      address as: {s.name}{alias}")
         if s.charter:
             lines.append(f"      {s.charter}")
         if s.claims:
