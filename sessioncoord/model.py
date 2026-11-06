@@ -35,6 +35,15 @@ class Presence:
     #: told each other "infra:7" about a session that had become infra:6 (2026-10-10).
     title: str = ""
     claude_pid: int | None = None
+    #: The name the record was registered with, kept beside a live title that replaced it.
+    #: Set only by `cli._live`, never stored: under tmux `title` is read from the pane, which
+    #: Claude Code rewrites as a conversation goes, and mail addressed to the `--name` a session
+    #: registered with must still find it (2026-11-06).
+    registered_name: str = ""
+    #: True when `title` came from `register --name`, not from the pane. Only such a name is
+    #: kept over a later pane title and offered as an alias; an automatic title is just a
+    #: snapshot of what Claude Code called the pane once.
+    named: bool = False
     # Process occupying the pane is stored in claude_pid for compatibility with old records.
     engine: str = "claude"
     charter: str = ""
@@ -80,12 +89,15 @@ class Presence:
         return self.workdir.rstrip("/") == self.repo_root.rstrip("/")
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2, sort_keys=True)
+        d = asdict(self)
+        d.pop("registered_name", None)  # derived at read time; see the field
+        return json.dumps(d, indent=2, sort_keys=True)
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "Presence":
         known = {f for f in cls.__dataclass_fields__}  # tolerate fields a newer version added
         kw = {k: v for k, v in d.items() if k in known}
+        kw.pop("registered_name", None)  # derived at read time, never trusted from a file
         if "claims" in kw and kw["claims"] is not None:
             kw["claims"] = tuple(kw["claims"])
         return cls(**kw)

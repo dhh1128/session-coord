@@ -88,7 +88,10 @@ def _live_table():
     return tmuxio.panes()
 
 
-def _live(records, table=None):
+_READ = object()  # "read tmux now"; None is an answer meaning tmux could not be read
+
+
+def _live(records, table=_READ):
     """Records with `window` and `title` read from tmux NOW, not from when they registered.
 
     Windows renumber when Daniel closes one (`renumber-windows on`, which he keeps because
@@ -98,7 +101,9 @@ def _live(records, table=None):
     through here. A pane holding a different claude than the record's is left as recorded:
     that pane is somebody else now, and the sweep is what retires the record.
     """
-    table = _live_table() if table is None else table
+    # An explicit None is a failed read already made: reading again per repo is what made one
+    # `msg` wait out a stalled tmux once for every repo in the estate (hostile pass).
+    table = _live_table() if table is _READ else table
     # None is "could not ask tmux", and the stored values are the best there is. An EMPTY table
     # is an answer -- no panes at all -- and every record in it is stale (the fix-diff pass on
     # PR #35, finding 3).
@@ -116,7 +121,9 @@ def _live(records, table=None):
             out.append(p)
             continue
         if info and (p.claude_pid is None or info["claude_pid"] == p.claude_pid):
-            p = p.with_(window=info["window"], title=info.get("title") or p.title)
+            live_title = info.get("title") or p.title
+            p = p.with_(window=info["window"], title=live_title,
+                        registered_name=p.title if p.named and p.title != live_title else "")
         else:
             # Its pane is gone or holds someone else, so its stored window is a number another
             # session may hold now. Kept, `msg <window>` matched it and filed into the dead
@@ -126,7 +133,7 @@ def _live(records, table=None):
             # And the pane: kept, `msg %2` still matched the dead record and filed into its inbox
             # (the third pass on PR #35). A pane id addressed directly now reaches whoever
             # is in that pane, by the unregistered path.
-            p = p.with_(window=None, title="", pane=None)
+            p = p.with_(window=None, title="", pane=None, registered_name="")
         out.append(p)
     return out
 
@@ -284,8 +291,13 @@ def _register_locked(args, repo: str) -> int:
         pane=pane,
         window=args.window or tmuxio.window_of(pane or "") or (
             inherited.window if inherited else None),
-        title=(getattr(args, "name", None) or _title_of(pane)
-               or (inherited.title if inherited else "")),
+        # A name already on record outranks the pane's title: Claude Code retitles a pane as the
+        # conversation goes, and a re-register without --name (a /clear, a resume, a charter
+        # update) otherwise replaced the --name peers address it by (hostile pass, finding 3).
+        title=(getattr(args, "name", None)
+               or (inherited.title if inherited and inherited.named else "")
+               or _title_of(pane) or (inherited.title if inherited else "")),
+        named=bool(getattr(args, "name", None)) or bool(inherited and inherited.named),
         # A re-register without --pid must not blank the pid. The documented charter/claim
         # update in SKILL.md omits it, so this path is the common one, and a null pid makes
         # the next sweep treat a running session as dead.
@@ -672,9 +684,31 @@ def cmd_msg(args) -> int:
     # `clean_title` here, "%9 " and "会議A" matched registered sessions titled "9" and "A" --
     # now that the search spans every repo, a wrong match files private mail across the estate.
     want = _held_key(args.target)
-    matches = lambda p: (args.target in (p.pane, p.window, p.session_id)
-                         or (want and not want.startswith("%")
-                             and _held_key(p.title) == want))
+    # Two tiers. A live address (pane, window, id, current title) anywhere in the estate wins
+    # over a registered name, so a local session's old --name cannot capture mail meant for a
+    # peer that carries that title now (hostile pass on the alias change, finding 1).
+    by_name = bool(want) and not want.startswith("%")
+    primary = lambda p: (args.target in (p.pane, p.window, p.session_id)
+                         or (by_name and _held_key(p.title) == want))
+    alias = lambda p: by_name and bool(p.registered_name) and _held_key(p.registered_name) == want
+
+    # One tmux read and one load per repo, shared by both tiers: a miss used to scan the estate
+    # twice, querying tmux for every repo each time (hostile pass, finding 2).
+    table = _live_table()
+    cache: dict[str, list] = {}
+
+    def live_in(r):
+        if r not in cache:
+            cache[r] = _live(store.load_all(r), table)
+        return cache[r]
+
+    def search(matches):
+        local = [p for p in live_in(repo) if matches(p)]
+        if local:
+            return local, repo
+        found = [(other, p) for other in store.known_repos() if other != repo
+                 for p in live_in(other) if matches(p)]
+        return [p for _, p in found], (found[0][0] if len(found) == 1 else repo)
     if repo:
         # EVERY match, not the first one. A window label can name two registered sessions -- a
         # split window is the ordinary way -- and taking the first meant the body was filed into
@@ -683,17 +717,13 @@ def cmd_msg(args) -> int:
         # to the wrong session at once. Resolve to exactly one before anything is written.
         # LIVE windows and titles (`_live`): a stored window names whoever held that number
         # when the record was written, which after a close is a different session.
-        hits = [p for p in _live(store.load_all(repo)) if matches(p)]
+        # The foreman-imbu incident lasted an hour because a peer in another repo was
+        # mistaken for an unregistered target, then lost when the direct-send budget ran
+        # out. Keep local resolution first, but search the estate before deciding no inbox
+        # exists. The recipient's repo owns the queue, regardless of the sender's cwd.
+        hits, recipient_repo = search(primary)
         if not hits:
-            # The foreman-imbu incident lasted an hour because a peer in another repo was
-            # mistaken for an unregistered target, then lost when the direct-send budget ran
-            # out. Keep local resolution first, but search the estate before deciding no inbox
-            # exists. The recipient's repo owns the queue, regardless of the sender's cwd.
-            elsewhere = [(other, p) for other in store.known_repos() if other != repo
-                         for p in _live(store.load_all(other)) if matches(p)]
-            hits = [p for _, p in elsewhere]
-            if len(elsewhere) == 1:
-                recipient_repo = elsewhere[0][0]
+            hits, recipient_repo = search(alias)
         if len(hits) > 1:
             where = ", ".join(sorted(f"{p.repo_root}: {p.session_id} ({p.pane})"
                                      for p in hits))
@@ -1074,7 +1104,8 @@ def _held_key(value: str) -> str:
 
 def _held_names(p: Presence) -> set[str]:
     """Names by which held mail can find a session on a later turn."""
-    return {name for name in (_held_key(p.title), _held_key(p.session_id)) if name}
+    return {name for name in (_held_key(p.title), _held_key(p.registered_name),
+                              _held_key(p.session_id)) if name}
 
 
 def cmd_inbox(args) -> int:
