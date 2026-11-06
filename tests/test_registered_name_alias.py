@@ -65,3 +65,40 @@ def test_a_dead_session_does_not_keep_its_registered_name(world):
     world.setattr(cli.tmuxio, "send", lambda t, x, **kw: t)
     cli.main(["msg", "--repo", REPO, "pr1685-attribs", "hello"])
     assert store.load_inbox(REPO) == []
+
+
+def test_a_live_title_elsewhere_outranks_a_local_registered_name(world):
+    # Hostile p1.1: local session registered "alpha", now titled "beta"; a peer in another repo
+    # is titled "alpha" right now. `msg alpha` must reach the peer.
+    store.save(Presence(session_id="local-1", repo_root=REPO, workdir=REPO, pane="%3",
+                        claude_pid=3, title="alpha", tmux_server="999"))
+    store.save(Presence(session_id="remote-1", repo_root="/other", workdir="/other", pane="%4",
+                        claude_pid=4, title="alpha", tmux_server="999"))
+    table = {"%2": {"pane": "%2", "window": "bakobo:9", "claude_pid": 2, "title": "x"},
+             "%3": {"pane": "%3", "window": "w:3", "claude_pid": 3, "title": "beta"},
+             "%4": {"pane": "%4", "window": "w:4", "claude_pid": 4, "title": "alpha"}}
+    world.setattr(cli, "_live_table", lambda: table)
+    world.setattr(cli.tmuxio, "send", lambda t, x, **kw: t)
+    assert cli.main(["msg", "--repo", REPO, "alpha", "for remote"]) == 0
+    assert store.load_inbox(REPO) == []
+    assert [m.recipient for m in store.load_inbox("/other")] == ["remote-1"]
+
+
+def test_a_registered_name_is_never_read_from_a_file():
+    # Hostile p1.2: a stored alias would survive the stale-record scrub.
+    p = Presence.from_dict({"session_id": "s", "repo_root": "/r", "workdir": "/r",
+                            "registered_name": "victim"})
+    assert p.registered_name == ""
+    assert "registered_name" not in p.to_json()
+
+
+def test_re_registering_without_a_name_keeps_the_registered_one(world, monkeypatch):
+    # Hostile p1.3: a resume or charter update re-registers without --name.
+    monkeypatch.setenv("TMUX_PANE", "%2")
+    monkeypatch.setattr(cli, "_title_of", lambda pane: "PR1685-attribs brief")
+    monkeypatch.setattr(cli.tmuxio, "claude_pids", lambda run=None: {"%2": 2})
+    monkeypatch.setattr(cli.tmuxio, "window_of", lambda pane, run=None: "bakobo:9")
+    assert cli.main(["register", "--repo", REPO, "--session", "d0e290a3-0000", "--pid", "2",
+                     "--charter", "new charter"]) == 0
+    rec = [p for p in store.load_all(REPO) if p.session_id == "d0e290a3-0000"][0]
+    assert rec.title == "pr1685-attribs"

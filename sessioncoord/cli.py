@@ -128,7 +128,7 @@ def _live(records, table=None):
             # And the pane: kept, `msg %2` still matched the dead record and filed into its inbox
             # (the third pass on PR #35). A pane id addressed directly now reaches whoever
             # is in that pane, by the unregistered path.
-            p = p.with_(window=None, title="", pane=None)
+            p = p.with_(window=None, title="", pane=None, registered_name="")
         out.append(p)
     return out
 
@@ -286,8 +286,11 @@ def _register_locked(args, repo: str) -> int:
         pane=pane,
         window=args.window or tmuxio.window_of(pane or "") or (
             inherited.window if inherited else None),
-        title=(getattr(args, "name", None) or _title_of(pane)
-               or (inherited.title if inherited else "")),
+        # A name already on record outranks the pane's title: Claude Code retitles a pane as the
+        # conversation goes, and a re-register without --name (a /clear, a resume, a charter
+        # update) otherwise replaced the --name peers address it by (hostile pass, finding 3).
+        title=(getattr(args, "name", None) or (inherited.title if inherited else "")
+               or _title_of(pane)),
         # A re-register without --pid must not blank the pid. The documented charter/claim
         # update in SKILL.md omits it, so this path is the common one, and a null pid makes
         # the next sweep treat a running session as dead.
@@ -674,9 +677,21 @@ def cmd_msg(args) -> int:
     # `clean_title` here, "%9 " and "会議A" matched registered sessions titled "9" and "A" --
     # now that the search spans every repo, a wrong match files private mail across the estate.
     want = _held_key(args.target)
-    matches = lambda p: (args.target in (p.pane, p.window, p.session_id)
-                         or (want and not want.startswith("%")
-                             and want in (_held_key(p.title), _held_key(p.registered_name))))
+    # Two tiers. A live address (pane, window, id, current title) anywhere in the estate wins
+    # over a registered name, so a local session's old --name cannot capture mail meant for a
+    # peer that carries that title now (hostile pass on the alias change, finding 1).
+    by_name = bool(want) and not want.startswith("%")
+    primary = lambda p: (args.target in (p.pane, p.window, p.session_id)
+                         or (by_name and _held_key(p.title) == want))
+    alias = lambda p: by_name and bool(p.registered_name) and _held_key(p.registered_name) == want
+
+    def search(matches):
+        local = [p for p in _live(store.load_all(repo)) if matches(p)]
+        if local:
+            return local, repo
+        found = [(other, p) for other in store.known_repos() if other != repo
+                 for p in _live(store.load_all(other)) if matches(p)]
+        return [p for _, p in found], (found[0][0] if len(found) == 1 else repo)
     if repo:
         # EVERY match, not the first one. A window label can name two registered sessions -- a
         # split window is the ordinary way -- and taking the first meant the body was filed into
@@ -685,17 +700,13 @@ def cmd_msg(args) -> int:
         # to the wrong session at once. Resolve to exactly one before anything is written.
         # LIVE windows and titles (`_live`): a stored window names whoever held that number
         # when the record was written, which after a close is a different session.
-        hits = [p for p in _live(store.load_all(repo)) if matches(p)]
+        # The foreman-imbu incident lasted an hour because a peer in another repo was
+        # mistaken for an unregistered target, then lost when the direct-send budget ran
+        # out. Keep local resolution first, but search the estate before deciding no inbox
+        # exists. The recipient's repo owns the queue, regardless of the sender's cwd.
+        hits, recipient_repo = search(primary)
         if not hits:
-            # The foreman-imbu incident lasted an hour because a peer in another repo was
-            # mistaken for an unregistered target, then lost when the direct-send budget ran
-            # out. Keep local resolution first, but search the estate before deciding no inbox
-            # exists. The recipient's repo owns the queue, regardless of the sender's cwd.
-            elsewhere = [(other, p) for other in store.known_repos() if other != repo
-                         for p in _live(store.load_all(other)) if matches(p)]
-            hits = [p for _, p in elsewhere]
-            if len(elsewhere) == 1:
-                recipient_repo = elsewhere[0][0]
+            hits, recipient_repo = search(alias)
         if len(hits) > 1:
             where = ", ".join(sorted(f"{p.repo_root}: {p.session_id} ({p.pane})"
                                      for p in hits))

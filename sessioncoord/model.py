@@ -93,6 +93,7 @@ class Presence:
     def from_dict(cls, d: Mapping[str, Any]) -> "Presence":
         known = {f for f in cls.__dataclass_fields__}  # tolerate fields a newer version added
         kw = {k: v for k, v in d.items() if k in known}
+        kw.pop("registered_name", None)  # derived at read time, never trusted from a file
         if "claims" in kw and kw["claims"] is not None:
             kw["claims"] = tuple(kw["claims"])
         return cls(**kw)
