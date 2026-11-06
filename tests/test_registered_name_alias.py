@@ -138,3 +138,16 @@ def test_tmux_reads_do_not_grow_with_the_estate(world, monkeypatch):
     for i in range(20):
         store.save(Presence(session_id=f"x{i}", repo_root=f"/r{i}", workdir=f"/r{i}"))
     assert reads() == few
+
+
+def test_a_failed_tmux_read_is_not_repeated_per_repo(world, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "_live_table", lambda: calls.append(1) or None)
+    monkeypatch.setattr(cli.tmuxio, "send", lambda t, x, **kw: t)
+    cli.main(["msg", "--repo", REPO, "nobody-at-all", "hello"])
+    few = len(calls)
+    for i in range(20):
+        store.save(Presence(session_id=f"y{i}", repo_root=f"/q{i}", workdir=f"/q{i}"))
+    calls.clear()
+    cli.main(["msg", "--repo", REPO, "nobody-at-all", "hello"])
+    assert len(calls) == few

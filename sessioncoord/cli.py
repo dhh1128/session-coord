@@ -88,7 +88,10 @@ def _live_table():
     return tmuxio.panes()
 
 
-def _live(records, table=None):
+_READ = object()  # "read tmux now"; None is an answer meaning tmux could not be read
+
+
+def _live(records, table=_READ):
     """Records with `window` and `title` read from tmux NOW, not from when they registered.
 
     Windows renumber when Daniel closes one (`renumber-windows on`, which he keeps because
@@ -98,7 +101,9 @@ def _live(records, table=None):
     through here. A pane holding a different claude than the record's is left as recorded:
     that pane is somebody else now, and the sweep is what retires the record.
     """
-    table = _live_table() if table is None else table
+    # An explicit None is a failed read already made: reading again per repo is what made one
+    # `msg` wait out a stalled tmux once for every repo in the estate (hostile pass).
+    table = _live_table() if table is _READ else table
     # None is "could not ask tmux", and the stored values are the best there is. An EMPTY table
     # is an answer -- no panes at all -- and every record in it is stale (the fix-diff pass on
     # PR #35, finding 3).
