@@ -174,15 +174,30 @@ def _safe(text: str) -> str:
     return _BAD_IN_BODY.sub(lambda mo: repr(mo.group(0))[1:-1], text)
 
 
-def render(messages: Sequence[Message], marked_read: bool = True, you: str = "") -> str:
+EMPTY = ("Inbox empty. Mail the start-of-turn hook already put into one of your turns is "
+         "marked read and not listed here, so look in your recent turns before asking a peer "
+         "to resend.\n")
+
+DELIVERED = ("Delivered into this turn and marked read, so `session-coord inbox` will not list "
+             "these again.")
+
+
+def render(messages: Sequence[Message], marked_read: bool = True, you: str = "",
+           delivered: bool = False) -> str:
     """The inbox as a session reads it. Full bodies -- this is the delivery, not a summary.
 
     `marked_read` is the caller's report of what it actually persisted, not a formatting
     choice: `--peek` deliberately leaves the queue unread, and an unconditional "Marked read."
     told the reader the opposite of the truth about their own mail.
+
+    `delivered` is for the mail hook, which peeks, puts the text into the turn and then
+    acknowledges it. Its reader sees the text after the acknowledgement, so "Still unread --
+    this was a peek" was false by then. A doorbell made it worse: the doorbell's own prompt
+    fired the hook, the session then ran `inbox` as the doorbell said, found it empty, and told
+    its peer nothing had arrived (sumago, 2026-11-06).
     """
     if not messages:
-        return "Inbox empty.\n"
+        return EMPTY
     out = [f"{len(messages)} unread message(s), oldest first.", ""]
     if you:
         out[1:1] = [_safe(you)]
@@ -197,7 +212,8 @@ def render(messages: Sequence[Message], marked_read: bool = True, you: str = "")
         for line in _safe(m.body).rstrip().splitlines():
             out.append(f"    {line}")
         out.append("")
-    state = "Marked read." if marked_read else "Still unread -- this was a peek."
+    state = (DELIVERED if delivered else
+             "Marked read." if marked_read else "Still unread -- this was a peek.")
     names = sorted({m.sender_name for m in messages if m.sender_name})
     to = names[0] if len(names) == 1 else "<their name>"
     # Single-quoted for the shell, never double: the hint is meant to be pasted, and inside
