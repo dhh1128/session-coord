@@ -187,6 +187,7 @@ def test_inbox_session_naming_nobody_refuses_and_mentions_held_mail(world, capsy
 def test_msg_by_window_name_files_for_the_registered_session(world):
     # 2026-11-06: "codex-p2v1" was the tmux window name; msg answered "no pane matches".
     world.setattr(cli.tmuxio, "window_names", lambda run=None: {"%2": "codex-p2v1"})
+    world.setattr(cli.tmuxio, "panes", lambda run=None: {"%2": {"claude_pid": 2, "title": "t"}})
     world.setattr(cli.tmuxio, "send", lambda t, x, **kw: t)
     assert cli.main(["msg", "--repo", REPO, "codex-p2v1", "by window"]) == 0
     assert [(m.recipient, m.body) for m in store.load_inbox(REPO)] == [("d0e290a3-0000",
@@ -205,3 +206,52 @@ def test_pane_of_window_name_resolves_one_engine_pane_and_refuses_two(monkeypatc
                         lambda run=None: {"%1": "w", "%2": "w", "%3": "w"})
     with pytest.raises(tmuxio.AmbiguousTarget):
         tmuxio.pane_of_window_name("w")
+
+
+def test_a_window_name_shared_with_an_unregistered_pane_refuses(world, capsys):
+    # Hostile pass on #14, finding 1: only registered panes were searched, so the ambiguity
+    # tmuxio would have refused was decided in favour of the registered one.
+    from sessioncoord import tmuxio
+    world.setattr(tmuxio, "panes", lambda run=None: {
+        "%2": {"claude_pid": 2, "title": "a"}, "%5": {"claude_pid": 5, "title": "b"}})
+    world.setattr(tmuxio, "window_names", lambda run=None: {"%2": "shared", "%5": "shared"})
+    world.setattr(cli.tmuxio, "send", lambda *a, **kw: pytest.fail("sent"))
+    assert cli.main(["msg", "--repo", REPO, "shared", "x"]) == 2
+    assert store.load_inbox(REPO) == [] and "window of 2 sessions" in capsys.readouterr().err
+
+
+def test_a_title_that_is_another_panes_window_name_refuses(world, capsys):
+    # Hostile pass on #14, finding 2, at the CLI: the registered title must not win silently.
+    from sessioncoord import tmuxio
+    world.setattr(tmuxio, "panes", lambda run=None: {
+        "%2": {"claude_pid": 2, "title": "PR1685-attribs brief"},
+        "%5": {"claude_pid": 5, "title": "other"}})
+    world.setattr(tmuxio, "window_names",
+                  lambda run=None: {"%2": "w2", "%5": "PR1685-attribs brief"})
+    world.setattr(cli.tmuxio, "send", lambda *a, **kw: pytest.fail("sent"))
+    assert cli.main(["msg", "--repo", REPO, "PR1685-attribs brief", "x"]) == 2
+    assert store.load_inbox(REPO) == [] and "window of another" in capsys.readouterr().err
+
+
+def test_send_refuses_a_title_that_is_another_panes_window_name(monkeypatch):
+    # Hostile pass on #14, finding 2, in tmuxio.send.
+    from sessioncoord import tmuxio
+    table = {"%1": {"pane": "%1", "claude_pid": 1, "engine": "claude", "title": "shared"},
+             "%2": {"pane": "%2", "claude_pid": 2, "engine": "claude", "title": "x"}}
+    monkeypatch.setattr(tmuxio, "panes", lambda run=None: table)
+    monkeypatch.setattr(tmuxio, "pane_of_window", lambda t, run=None: None)
+    monkeypatch.setattr(tmuxio, "window_names", lambda run=None: {"%1": "a", "%2": "shared"})
+    typed = []
+    run = lambda argv: typed.append(argv) or "ok"
+    with pytest.raises(tmuxio.SendRefused, match="title of %1 and the window of %2"):
+        tmuxio.send("shared", "hello", run)
+    assert not any(a[1] == "send-keys" for a in typed)
+
+
+def test_a_malformed_record_does_not_crash_inbox_resolution(world, capsys):
+    # Hostile pass on #14, finding 3: an integer session id on disk.
+    world.setattr(cli.store, "load_all", lambda repo: [
+        Presence.from_dict({"session_id": 12345678, "repo_root": REPO, "workdir": REPO}),
+        Presence(session_id="d0e290a3-0000", repo_root=REPO, workdir=REPO, pane="%2",
+                 claude_pid=2, title="pr1685-attribs", tmux_server="999", named=True)])
+    assert cli.main(["inbox", "--repo", REPO, "--session", "d0e290a3", "--peek"]) == 0

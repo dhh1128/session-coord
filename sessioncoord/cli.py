@@ -985,13 +985,30 @@ def cmd_msg(args) -> int:
             hits, recipient_repo = search(primary)
         if not hits:
             hits, recipient_repo = search(alias)
-        if not hits and by_name and table is not None:
-            # Last, a tmux WINDOW name: what a launching session called its worker. Without it a
-            # registered peer addressed by window name fell to the unregistered path and was
-            # typed at rather than filed (2026-11-06 handoff, V9).
-            wnames = tmuxio.window_names() or {}
-            hits, recipient_repo = search(
-                lambda p: bool(p.pane) and _held_key(wnames.get(p.pane, "")) == want)
+        # A tmux WINDOW name: what a launching session called its worker. Without it a
+        # registered peer addressed by window name fell to the unregistered path and was typed
+        # at rather than filed (2026-11-06 handoff, V9). It is resolved over EVERY engine pane,
+        # registered or not, so a name two panes share refuses instead of picking the one that
+        # happens to be registered; and a name that is one pane's title and another pane's
+        # window names two sessions, so that refuses too (hostile pass on #14).
+        named_by = {p.pane for p in hits}
+        loose = by_name and table is not None and not any(
+            args.target in (p.pane, p.window, p.session_id) for p in hits)
+        if loose:
+            try:
+                wpane = tmuxio.pane_of_window_name(args.target)
+            except tmuxio.AmbiguousTarget as e:
+                print(f"session-coord: {e} Nothing was filed and nothing was sent.",
+                      file=sys.stderr)
+                return 2
+            if wpane and hits and wpane not in named_by:
+                print(f"session-coord: {args.target!r} is the name of one session and the tmux "
+                      f"window of another ({wpane}), so it does not name one. Nothing was filed "
+                      "and nothing was sent; address a pane id or a session id.",
+                      file=sys.stderr)
+                return 2
+            if wpane and not hits:
+                hits, recipient_repo = search(lambda p: p.pane == wpane)
         if len(hits) > 1:
             where = ", ".join(sorted(f"{p.repo_root}: {p.session_id} ({p.pane})"
                                      for p in hits))
@@ -1486,9 +1503,13 @@ def _resolve_session_arg(repo: str, given: str) -> tuple[str | None, str]:
     records = store.load_all(repo)
     if any(p.session_id == given for p in records):
         return given, ""
+    records = [p for p in records if isinstance(p.session_id, str)]
     live = _live(records)
     by_name = [p for p in live if given in (p.name, p.title, p.registered_name)]
-    by_prefix = [p for p in records if len(given) >= 8 and p.session_id.startswith(given)]
+    # A record whose id is not a string is damage on disk, not a session; skip it rather than
+    # crash the one command a session uses to read its mail (hostile pass on #14).
+    by_prefix = [p for p in records if len(given) >= 8 and isinstance(p.session_id, str)
+                 and p.session_id.startswith(given)]
     found = {p.session_id for p in by_name + by_prefix}
     if len(found) == 1:
         return found.pop(), ""

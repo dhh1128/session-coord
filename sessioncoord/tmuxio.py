@@ -707,9 +707,18 @@ def _resolve(target: str, run: Runner, expect_pid: int | None) -> tuple[str, str
     if table is None:
         raise SendRefused("tmux could not be consulted; nothing was sent.")
     try:
-        pane = target if target in table else (
-            pane_of_window(target, run) or pane_of_title(target, run)
-            or pane_of_window_name(target, run))
+        pane = target if target in table else pane_of_window(target, run)
+        if pane is None:
+            # A title and a window name are both names a person chose, so neither outranks the
+            # other: one pane's title equal to another pane's window name names two sessions
+            # (hostile pass on #14).
+            by_title = pane_of_title(target, run)
+            by_window = pane_of_window_name(target, run)
+            if by_title and by_window and by_title != by_window:
+                raise AmbiguousTarget(
+                    f"{target!r} is the title of {by_title} and the window of {by_window}. "
+                    "Address a pane id or a session id instead.")
+            pane = by_title or by_window
     except AmbiguousTarget as e:
         raise SendRefused(f"{e} Nothing was sent.") from None
     if pane is None or pane not in table:
