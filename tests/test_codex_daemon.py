@@ -241,3 +241,21 @@ def test_register_refuses_an_inherited_daemon_pid_and_an_unreadable_one(world, m
     assert cli.main(["register", "--session", "t", "--charter", "x"]) == 2
     assert cli.main(["register", "--session", "u", "--engine", "codex", "--pid", "5555"]) == 2
     assert [p.session_id for p in store.load_all("/w")] == ["t"]
+
+
+def test_a_refused_register_keeps_the_record_it_would_replace(world, monkeypatch):
+    # Hostile fix-diff pass on #11, finding 1: supersede ran before the refusal.
+    store.save(Presence(session_id="old", repo_root="/w", workdir="/w", pane="%3",
+                        claude_pid=7000, engine="codex", title="t"))
+    monkeypatch.setattr(procio, "argv_of", lambda pid: None)
+    assert cli.main(["register", "--session", "new", "--engine", "codex", "--pid", "7000",
+                     "--pane", "%3"]) == 2
+    assert [p.session_id for p in store.load_all("/w")] == ["old"]
+
+
+def test_declaring_claude_does_not_admit_the_daemon_pid(world, monkeypatch):
+    # Hostile fix-diff pass on #11, finding 2.
+    monkeypatch.setattr(procio, "argv_of", lambda pid: DAEMON if pid == 1352327 else None)
+    assert cli.main(["register", "--session", "t", "--engine", "claude",
+                     "--pid", "1352327"]) == 2
+    assert store.load_all("/w") == []

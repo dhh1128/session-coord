@@ -256,26 +256,6 @@ def _register_locked(args, repo: str) -> int:
         if p.session_id != args.session and p.pane == pane and pane
         and p.claude_pid is not None and p.claude_pid == args.pid
     ]
-    for old in superseded:
-        # NO MAIL REBIND HERE, and its absence is deliberate rather than an oversight.
-        #
-        # A /clear does strand unread mail: it is filed against the departed session id, so
-        # `inbox` never returns it. That is a real gap, recorded on PR #11 as `P-R1Z5`, and it
-        # predates the delivery hook.
-        #
-        # A rebind was written here and removed. It could not fail safely. Registration must
-        # never fail over mail -- an unregistered pane is invisible to every peer, which is
-        # strictly worse -- so a failed rebind fell through to this `remove` and orphaned the
-        # mail it existed to save. And resolving the recipient before taking the inbox lock let
-        # a concurrent /clear file a message under an id this loop had just deleted. Two
-        # defects, both inside the fix, both found in the round after it landed.
-        #
-        # Carrying mail across an id change needs a decision, not a patch: either the old
-        # record survives until the mail has moved, or registration retries, or `inbox`
-        # resolves superseded ids at read time. Leaving the gap is worse than nothing only if
-        # you believe a rebind that silently loses mail is better than one that visibly never
-        # ran. See A-W552.
-        store.remove(repo, old.session_id)
     inherited = prior or (superseded[0] if superseded else None)
 
     detected_engine, detected_pid = None, None
@@ -298,9 +278,11 @@ def _register_locked(args, repo: str) -> int:
     # The shared daemon identifies none of the sessions attached to it, whether its pid came
     # from --pid or from a record that already held it. An unreadable command line for a live
     # pid is not evidence that it is something else (hostile fix-diff pass on #11).
-    if engine == "codex" and session_pid is not None:
+    # Any engine: a caller cannot make the daemon a session by declaring --engine claude.
+    if session_pid is not None:
         argv = procio.argv_of(session_pid)
-        if procio.is_codex_server(argv) or (argv is None and procio.start_of(session_pid)):
+        if procio.is_codex_server(argv) or (engine == "codex" and argv is None
+                                            and procio.start_of(session_pid)):
             print(f"session-coord: not registered. {session_pid} is Codex's shared app-server "
                   "daemon, or a process whose command line could not be read; the daemon is "
                   "shared by every attached session and identifies none of them. Pass the pid "
@@ -322,6 +304,29 @@ def _register_locked(args, repo: str) -> int:
                   f"{session_pid}; a record naming {session_pid} would read as dead and be "
                   f"swept. Pass --pid {seen} if that pane is this session.", file=sys.stderr)
             return 2
+
+    # Removed only now, after every refusal above: a refused register must leave the record
+    # it would have replaced (hostile fix-diff pass on #11).
+    for old in superseded:
+        # NO MAIL REBIND HERE, and its absence is deliberate rather than an oversight.
+        #
+        # A /clear does strand unread mail: it is filed against the departed session id, so
+        # `inbox` never returns it. That is a real gap, recorded on PR #11 as `P-R1Z5`, and it
+        # predates the delivery hook.
+        #
+        # A rebind was written here and removed. It could not fail safely. Registration must
+        # never fail over mail -- an unregistered pane is invisible to every peer, which is
+        # strictly worse -- so a failed rebind fell through to this `remove` and orphaned the
+        # mail it existed to save. And resolving the recipient before taking the inbox lock let
+        # a concurrent /clear file a message under an id this loop had just deleted. Two
+        # defects, both inside the fix, both found in the round after it landed.
+        #
+        # Carrying mail across an id change needs a decision, not a patch: either the old
+        # record survives until the mail has moved, or registration retries, or `inbox`
+        # resolves superseded ids at read time. Leaving the gap is worse than nothing only if
+        # you believe a rebind that silently loses mail is better than one that visibly never
+        # ran. See A-W552.
+        store.remove(repo, old.session_id)
 
     cwd = os.path.realpath(os.path.expanduser(args.cwd or os.getcwd()))
     p = Presence(
