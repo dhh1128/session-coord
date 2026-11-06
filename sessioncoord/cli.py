@@ -1161,7 +1161,15 @@ def cmd_inbox(args) -> int:
                         queue = list(queue) + moved
                         store.save_inbox(repo, queue)
                     moved_ids = {m.id for m in selected}
-                    store.save_held([m for m in held if m.id not in moved_ids])
+                    # The mail is already in this inbox. If held mail cannot be rewritten, the
+                    # next read finds the same ids there and skips them, so a failure here only
+                    # delays the cleanup; raising would withhold the mail it just delivered
+                    # (hostile pass at 80c2779, finding 1).
+                    try:
+                        store.save_held([m for m in held if m.id not in moved_ids])
+                    except OSError as e:
+                        print(f"session-coord: delivered held mail, but could not remove it "
+                              f"from held mail: {e}", file=sys.stderr)
                 mine = inbox_mod.unread(queue, who)
                 # `--ack` acknowledges exactly the messages that were delivered, by id, rather
                 # than "whatever is unread now". The delivery hook reads without clearing, writes

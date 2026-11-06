@@ -385,3 +385,22 @@ def test_a_failed_prune_does_not_block_the_sessions_own_inbox(estate, capsys):
     out = capsys.readouterr()
     assert "normal mail" in out.out
     assert "could not prune expired held mail" in out.err
+
+
+def test_unwritable_held_mail_still_delivers_this_sessions_held_message(estate, capsys):
+    from datetime import datetime, timezone
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    store.save_held([_held("old", "2026-10-13T00:00:00+00:00", "someone-gone"),
+                     _held("mine", fresh)])
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+
+    def refuse(messages):
+        raise PermissionError("immutable")
+
+    estate.setattr(store, "save_held", refuse)
+    for _ in range(2):
+        assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+        out = capsys.readouterr()
+        assert "body mine" in out.out
+    assert [m.id for m in store.load_inbox(OTHER)] == ["mine"]
