@@ -412,3 +412,26 @@ def test_unwritable_held_mail_is_left_held_rather_than_delivered_twice(estate, c
     assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
     assert "body mine" in capsys.readouterr().out
     assert store.load_held() == []
+
+
+def test_a_removal_that_fails_after_the_check_takes_the_message_back(estate, capsys):
+    from datetime import datetime, timezone
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    store.save_held([_held("mine", fresh)])
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+    real_save = store.save_held
+    calls = []
+
+    def first_ok_then_refuse(messages):
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("disk went away")
+        return real_save(messages)
+
+    estate.setattr(store, "save_held", first_ok_then_refuse)
+    assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+    out = capsys.readouterr()
+    assert "body mine" not in out.out and "stays held" in out.err
+    assert [m.id for m in store.load_held()] == ["mine"]
+    assert store.load_inbox(OTHER) == []
