@@ -274,7 +274,7 @@ def _text(value: str) -> str:
 
 def _why(code: int | None, err: bytes) -> str:
     text = err.decode("utf-8", "replace").strip().splitlines()
-    tail = text[-1] if text else ""
+    tail = _text(text[-1]).strip() if text else ""
     if code == 255:
         return f"ssh failed: {tail or 'no detail'}"
     if "unrecognized arguments" in tail or "invalid choice" in tail:
@@ -362,15 +362,23 @@ def fetch(hosts: list[Host], deadline: float = DEADLINE, net=None) -> tuple[list
     threads = [threading.Thread(target=read, args=item, daemon=True) for item in live.items()]
     for t in threads:
         t.start()
+    # Join only until the shared deadline, then kill whatever is still running: a kill closes
+    # the pipe, which is what unblocks a reader stuck in read(). A per-thread grace period
+    # added up to a second for every hung host (Copilot on PR #12).
     for t in threads:
-        t.join(max(0.0, end - time.monotonic()) + 1.0)
+        t.join(max(0.0, end - time.monotonic()))
+    late = {name for name in live if name not in answers}
+    for name in late:
+        live[name].kill()
+    for t in threads:
+        t.join(0.5)
     for name, proc in live.items():
-        got = answers.get(name)
+        got = None if name in late else answers.get(name)
         if got is None:
             proc.kill()
             try:
-                proc.communicate(timeout=1.0)
-            except (subprocess.TimeoutExpired, ValueError):
+                proc.wait(timeout=0.5)  # reap it; its reader thread owns the pipes
+            except subprocess.TimeoutExpired:
                 pass
             views[name] = HostView(name, problem=f"no answer within {deadline:g}s")
             continue

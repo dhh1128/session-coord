@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -364,3 +365,57 @@ class TestRemoteDoorbellBudget:
         monkeypatch.setattr(cli._Doorbell, "reserve", lambda self: None)
         cli.main(["msg", "peer@kelun", "hi"])
         assert "--no-ring" not in seen["argv"][-1]
+
+
+
+class TestCopilotOnPR12:
+    def test_hung_hosts_do_not_stretch_the_deadline(self, home, monkeypatch):
+        import sys
+        hang = [sys.executable, "-c", "import time; time.sleep(30)"]
+        monkeypatch.setattr(remote, "remote_argv", lambda h, *a: hang)
+        t0 = time.monotonic()
+        views, _ = remote.fetch([remote.Host(f"h{i}") for i in range(4)], deadline=0.5,
+                                net={})
+        assert time.monotonic() - t0 < 2.5
+        assert all("no answer" in v.problem for v in views)
+
+    def test_an_ssh_error_line_cannot_carry_escapes(self):
+        assert "\x1b" not in remote._why(255, b"ssh: \x1b[2Jboom\n")
+
+    def test_the_reply_address_crosses_with_the_message(self, home, monkeypatch):
+        from sessioncoord.model import Presence
+        hosts_file(home, monkeypatch, "kelun\n")
+        seen = {}
+        monkeypatch.setattr(remote, "_spawn",
+                            lambda argv, stdin=None: seen.setdefault("argv", argv) and FakeProc())
+        me = Presence(session_id="s1", repo_root="/r", workdir="/r", title="guard")
+        monkeypatch.setattr(cli, "_me_anywhere", lambda repo: me)
+        monkeypatch.setattr(cli._Doorbell, "reserve", lambda self: None)
+        cli.main(["msg", "peer@kelun", "hi"])
+        assert "--sender-name s1@sumago" in seen["argv"][-1]
+
+    def test_the_far_side_records_it_for_the_reply_hint(self, home, monkeypatch):
+        from sessioncoord import store
+        from sessioncoord.model import Presence
+        monkeypatch.setattr(cli, "_resolve_repo", lambda args: "/repo")
+        monkeypatch.setattr(cli, "_me", lambda repo: None)
+        monkeypatch.setattr(cli, "_me_anywhere", lambda repo: None)
+        store.save(Presence(session_id="peer", repo_root="/repo", workdir="/repo", pane=None,
+                            claude_pid=1))
+        assert cli.main(["msg", "peer", "hi", "--sender", "g@sumago",
+                         "--sender-name", "s1@sumago"]) == 0
+        assert store.load_inbox("/repo")[0].sender_name == "s1@sumago"
+
+    def test_a_repo_with_no_registrant_still_has_its_worktrees_listed(self, monkeypatch):
+        from sessioncoord import gitio, store
+        from sessioncoord.model import Presence
+        monkeypatch.setattr(store, "known_repos", lambda: ["/devenv"])
+        monkeypatch.setattr(store, "load_all", lambda repo: [Presence(
+            session_id="s", repo_root="/devenv", workdir="/sc/.worktrees/x")])
+        monkeypatch.setattr(gitio, "repo_root",
+                            lambda p, run=None: "/sc" if p.startswith("/sc") else "/devenv")
+        monkeypatch.setattr(gitio, "worktrees", lambda r, run=None: (
+            [("/sc", "main"), ("/sc/.worktrees/x", "x")] if r == "/sc" else [("/devenv", "main")]))
+        monkeypatch.setattr(remote, "origin_of", lambda r: "o" + r)
+        trees = cli._estate_view()["worktrees"]
+        assert [t["path"] for t in trees] == ["/sc/.worktrees/x"]

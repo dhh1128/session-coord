@@ -361,7 +361,14 @@ def _estate_view() -> dict:
     # session-coord/.worktrees/codex-appserver, so a board matched on origin missed it; what
     # found it was listing that repo's worktrees by hand.
     trees = []
-    for repo in store.known_repos():
+    # Not only repos with a registrant: the case this exists for is a session registered in
+    # one repo working in another, which may have no registrant at all (Copilot on PR #12).
+    roots = set(store.known_repos())
+    for s in out:
+        root = gitio.repo_root(s["workdir"]) if s["workdir"] else None
+        if root:
+            roots.add(root)
+    for repo in sorted(roots):
         origin = remote.origin_of(repo)
         for path, branch in gitio.worktrees(repo):
             if os.path.realpath(path) != os.path.realpath(repo):
@@ -755,7 +762,10 @@ def _msg_remote(args, name: str, host) -> int:
         sender = f"{me.name}@{here} (reply to {me.session_id}@{here})"
     else:
         sender = f"a peer@{here}"
-    argv = ["msg", name, "-", "--sender", sender,
+    # The reply address goes across separately: over ssh the far box has no record of this
+    # session, so without it the recipient is told to reply to nobody (Copilot on PR #12).
+    reply_to = f"{me.session_id}@{here}" if me else ""
+    argv = ["msg", name, "-", "--sender", sender, *(["--sender-name", reply_to] if reply_to else []),
             "--reply", getattr(args, "reply", comms.REPLY_NONE)]
     if args.subject:
         argv += ["--subject", args.subject]
@@ -1006,7 +1016,7 @@ def cmd_msg(args) -> int:
                 queue = list(queue) + [inbox_mod.Message(
                     id=f"{_now()}-{os.getpid()}-{len(queue)}",
                     sender=sender or "a peer", recipient=recipient.session_id,
-                    sender_name=me.name if me else "",
+                    sender_name=me.name if me else (args.sender_name or ""),
                     body=args.text, created=_now(), subject=args.subject or "",
                     reply=reply)]
                 store.save_inbox(recipient_repo, queue)
@@ -1108,7 +1118,8 @@ def cmd_msg(args) -> int:
             queue, _ = store.unexpired_held(queue)
             queue.append(inbox_mod.Message(
                 id=f"held-{uuid.uuid4().hex}", sender=sender or "a peer", recipient=key,
-                sender_name=me.name if me else "", body=args.text, created=_now(),
+                sender_name=me.name if me else (args.sender_name or ""), body=args.text,
+                created=_now(),
                 subject=args.subject or "", reply=reply))
             store.save_held(queue)
     except locks.Busy as e:
@@ -1606,6 +1617,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="one line saying what breaks if this waits; rings past the budget and records the reason.")
     m.add_argument("--no-ring", dest="no_ring", action="store_true",
                    help=argparse.SUPPRESS)  # file without ringing: set by a remote sender
+    m.add_argument("--sender-name", dest="sender_name", default="",
+                   help=argparse.SUPPRESS)  # the reply address, set by a remote sender
     m.set_defaults(func=cmd_msg)
 
     lk = sub.add_parser("lock", help="run a command under a named per-repo lock")
