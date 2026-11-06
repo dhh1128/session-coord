@@ -254,3 +254,58 @@ def test_remote_msg_carries_pid_and_force(home, monkeypatch):
     cli.main(["msg", "%9@kelun", "hi", "--pid", "123", "--force"])
     tail = seen["argv"][-1]
     assert "--pid 123" in tail and "--force" in tail
+
+
+class TestCodexSandbox:
+    """Codex runs commands with the network off by default and says so in the environment."""
+
+    def test_the_board_says_why_instead_of_blaming_the_other_box(self, home, monkeypatch):
+        monkeypatch.setenv("CODEX_SANDBOX_NETWORK_DISABLED", "1")
+        monkeypatch.setattr(remote, "_spawn", lambda *a, **k: pytest.fail("dialled"))
+        views, note = remote.fetch([remote.Host("kelun")], net={})
+        assert "Codex's sandbox" in note and views[0].problem == "not asked"
+
+    def test_msg_refuses_with_the_reason_and_sends_nothing(self, home, monkeypatch, capsys):
+        monkeypatch.setenv("CODEX_SANDBOX_NETWORK_DISABLED", "1")
+        hosts_file(home, monkeypatch, "kelun\n")
+        monkeypatch.setattr(remote, "_spawn", lambda *a, **k: pytest.fail("dialled"))
+        monkeypatch.setattr(cli, "_me_anywhere", lambda repo: None)
+        assert cli.main(["msg", "peer@kelun", "hi"]) == 2
+        assert "Codex's sandbox" in capsys.readouterr().err
+
+
+class TestWorkInAnotherRepo:
+    """2026-11-06: a session registered in devenv on kelun was working in a session-coord
+    worktree there, and the board matched on origin did not show it."""
+
+    def test_a_worktree_of_this_repo_with_no_session_in_it_is_shown(self):
+        v = remote.HostView("kelun", sessions=[
+            sess("handoff", origin="github.com/dhh1128/devenv", repo="/home/d/devenv")],
+            worktrees=[{"repo_root": "/home/d/sc", "origin": "github.com/dhh1128/session-coord",
+                        "path": "/home/d/sc/.worktrees/codex-appserver",
+                        "branch": "codex-appserver"}])
+        out = remote.render([v], "github.com/dhh1128/session-coord")
+        assert "worktree /home/d/sc/.worktrees/codex-appserver  (codex-appserver)" in out
+
+    def test_a_worktree_a_session_is_in_is_not_repeated(self):
+        path = "/home/d/sc/.worktrees/x"
+        v = remote.HostView("kelun", sessions=[sess("a", workdir=path)],
+                            worktrees=[{"origin": "github.com/o/r", "path": path,
+                                        "branch": "x"}])
+        assert "no session registered" not in remote.render([v], "github.com/o/r")
+
+    def test_the_fetch_and_cache_carry_worktrees(self, home, monkeypatch):
+        body = json.dumps({"sessions": [], "worktrees": [{"path": "/p", "origin": "o"}]})
+        monkeypatch.setattr(remote, "_spawn", lambda *a, **k: FakeProc(body.encode()))
+        assert remote.fetch([remote.Host("kelun")], net={})[0][0].worktrees[0]["path"] == "/p"
+        monkeypatch.setattr(remote, "_spawn", lambda *a, **k: FakeProc(code=255))
+        assert remote.fetch([remote.Host("kelun")], net={})[0][0].worktrees[0]["path"] == "/p"
+
+
+def test_gitio_worktrees_reads_porcelain():
+    from sessioncoord import gitio
+    porcelain = ("worktree /r\nHEAD abc\nbranch refs/heads/main\n\n"
+                 "worktree /r/.worktrees/x\nHEAD def\nbranch refs/heads/x\n\n"
+                 "worktree /r/.worktrees/d\nHEAD 123\ndetached\n")
+    assert gitio.worktrees("/r", lambda argv, cwd: porcelain) == [
+        ("/r", "main"), ("/r/.worktrees/x", "x"), ("/r/.worktrees/d", "")]

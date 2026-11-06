@@ -871,7 +871,21 @@ def cmd_msg(args) -> int:
         # mistaken for an unregistered target, then lost when the direct-send budget ran
         # out. Keep local resolution first, but search the estate before deciding no inbox
         # exists. The recipient's repo owns the queue, regardless of the sender's cwd.
-        hits, recipient_repo = search(primary)
+        # Tier zero: an exact session id, across the whole estate, before any title is looked
+        # at. A session id is what the cross-box sender line gives as the reply address, so it
+        # has to mean that session even when some other session -- in this repo, which is
+        # searched first -- carries a title equal to it (hostile pass on cross-host). A session
+        # with records in several repos reads the inbox of the one it is in now, so prefer the
+        # local record, else the most recently updated.
+        by_id = [(r, p) for r in [repo] + [o for o in store.known_repos() if o != repo]
+                 for p in live_in(r) if p.session_id == args.target]
+        if by_id:
+            local = [x for x in by_id if x[0] == repo]
+            recipient_repo, chosen = local[0] if local else max(by_id,
+                                                               key=lambda x: x[1].updated)
+            hits = [chosen]
+        else:
+            hits, recipient_repo = search(primary)
         if not hits:
             hits, recipient_repo = search(alias)
         if len(hits) > 1:

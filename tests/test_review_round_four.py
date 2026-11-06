@@ -144,6 +144,17 @@ class TestMsgAcceptsASessionIdTarget:
         assert cli.main(["msg", "--repo", "/repo", "7df6c2fe-b110", "a message"]) == 0
         assert seen["target"] == "%74" and seen["pid"] == 171425
 
+    def test_a_session_id_beats_a_local_title_equal_to_it(self, home, fake_world, monkeypatch):
+        # The cross-box sender line gives a session id as the reply address. A session HERE
+        # titled with that id used to capture the reply, because titles were matched in the
+        # same pass and this repo is searched first (hostile pass on cross-host).
+        store.save(Presence(session_id="victim-id", repo_root="/other", workdir="/other",
+                            pane=None, claude_pid=333, title="the real one"))
+        store.save(rec("attacker", pane=None, pid=111, title="victim-id", named=True))
+        assert cli.main(["msg", "--repo", "/repo", "victim-id", "private"]) == 0
+        assert [m.recipient for m in store.load_inbox("/other")] == ["victim-id"]
+        assert store.load_inbox("/repo") == []
+
     def test_a_pane_target_is_left_alone(self, home, fake_world, monkeypatch):
         store.save(rec("s1", pane="%74", pid=171425))
         seen = {}
