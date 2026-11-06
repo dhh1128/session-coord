@@ -255,3 +255,13 @@ def test_a_malformed_record_does_not_crash_inbox_resolution(world, capsys):
         Presence(session_id="d0e290a3-0000", repo_root=REPO, workdir=REPO, pane="%2",
                  claude_pid=2, title="pr1685-attribs", tmux_server="999", named=True)])
     assert cli.main(["inbox", "--repo", REPO, "--session", "d0e290a3", "--peek"]) == 0
+
+
+def test_inbox_session_names_compare_as_msg_compares_them(world, capsys):
+    # Copilot on #14: case and a leading status glyph, normalised by _held_key for msg.
+    world.setattr(cli.tmuxio, "claude_pids", lambda run=None: {"%2": 2})
+    from sessioncoord.inbox import Message
+    store.save_inbox(REPO, [Message(id="m1", sender="x", recipient="d0e290a3-0000",
+                                    body="for you", created="2026-11-06T00:00:00+00:00")])
+    assert cli.main(["inbox", "--repo", REPO, "--session", "✳ PR1685-Attribs", "--peek"]) == 0
+    assert "for you" in capsys.readouterr().out

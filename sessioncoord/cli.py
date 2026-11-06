@@ -1505,7 +1505,11 @@ def _resolve_session_arg(repo: str, given: str) -> tuple[str | None, str]:
         return given, ""
     records = [p for p in records if isinstance(p.session_id, str)]
     live = _live(records)
-    by_name = [p for p in live if given in (p.name, p.title, p.registered_name)]
+    # Names compare as `msg` and held mail compare them, through `_held_key` (case, and a
+    # leading status glyph), so an address that works for `msg` works here (Copilot on #14).
+    key = _held_key(given)
+    by_name = [p for p in live if key and key in
+               {_held_key(n) for n in (p.name, p.title, p.registered_name) if n}]
     # A record whose id is not a string is damage on disk, not a session; skip it rather than
     # crash the one command a session uses to read its mail (hostile pass on #14).
     by_prefix = [p for p in records if len(given) >= 8 and isinstance(p.session_id, str)
@@ -1519,7 +1523,7 @@ def _resolve_session_arg(repo: str, given: str) -> tuple[str | None, str]:
     if _SESSION_ID.match(given):
         return given, ""
     try:
-        waiting = sum(1 for m in store.load_held() if m.recipient == given and not m.read)
+        waiting = sum(1 for m in store.load_held() if m.recipient == key and not m.read)
     except store.UnreadableQueue:
         waiting = 0
     hint = (f" {waiting} held message(s) are waiting for that name; they are delivered when a "
