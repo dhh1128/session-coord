@@ -26,6 +26,16 @@ def main() -> int:
             or not isinstance(cwd, str) or not cwd):
         return 0
     pid = procio.codex_ancestor()
+    if pid is not None and procio.is_codex_server(procio.argv_of(pid)):
+        # The shared app-server daemon runs this hook for every TUI attached to it, with the
+        # pane and process of whichever TUI started it. Registering from that would put this
+        # session in another session's pane. Say why instead of staying silent: a silent skip
+        # is how a Codex worker came to send mail while absent from the board.
+        sys.stdout.write(
+            "session-coord: this Codex session is NOT on the board. Codex is running it inside "
+            "its shared app-server daemon, which hides which tmux pane and process it is. "
+            "Relaunch with `codex --no-daemon` (or any `-c` override) to be registered.\n")
+        return 0
     if pid is None or procio.is_codex_headless(procio.argv_of(pid)):
         return 0
     cli = ROOT / "bin" / "session-coord"

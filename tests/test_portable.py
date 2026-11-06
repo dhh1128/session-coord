@@ -173,6 +173,9 @@ class TestIdentityWithoutTmux:
     def test_codex_manual_register_without_engine_uses_codex_process(self, world, monkeypatch):
         monkeypatch.setattr(cli.procio, "claude_ancestor", lambda pid=None: None)
         monkeypatch.setattr(cli.procio, "codex_ancestor", lambda pid=None: 4242)
+        # codex_ancestor found it by reading its argv, so that read succeeds here too.
+        monkeypatch.setattr(cli.procio, "argv_of",
+                            lambda pid: ["/opt/bin/codex"] if pid == 4242 else None)
         monkeypatch.setenv("CODEX_SESSION_ID", "codex-thread")
         assert cli.main(["register", "--name", "worker"]) == 0
         (p,) = store.load_all("/w")

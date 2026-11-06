@@ -26,7 +26,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from . import asks as asks_mod
-from . import comms, detect, gitio, harvest, locks, procio, remote, store, tmuxio
+from . import comms, detect, gitio, harvest, liveness, locks, procio, remote, store, tmuxio
 from . import inbox as inbox_mod
 from .model import Ask, Board, CONDUCTOR, Presence
 
@@ -231,7 +231,19 @@ def _register_locked(args, repo: str) -> int:
     # documented charter/claim update) inherits whatever pane that shell happens to sit in,
     # which would silently move the record to a pane the session is not in and make the next
     # sweep delete it.
-    pane = args.pane or (prior.pane if prior else None) or os.environ.get("TMUX_PANE")
+    pane = args.pane or (prior.pane if prior else None) or _env_pane()
+    # Under Codex's shared daemon nothing in this process says which session it is: the
+    # ancestry and TMUX_PANE both belong to the TUI that started the daemon. Detecting from
+    # them recorded the daemon's pid, which liveness rejects and the next sweep deletes, so
+    # the session was absent from the board while it went on sending mail (2026-11-06).
+    if (procio.under_codex_server() and args.pid is None and prior is None):
+        print("session-coord: not registered. This command runs inside Codex's shared "
+              "app-server daemon, so neither its process ancestry nor TMUX_PANE says which "
+              "session it is -- both belong to the Codex TUI that started the daemon.\n"
+              "  Relaunch Codex with `codex --no-daemon` (the SessionStart hook then registers "
+              "it), or pass --pid of this session's own codex process and its --pane.",
+              file=sys.stderr)
+        return 2
 
     # A /clear mints a NEW session id while the same claude process stays in the same pane.
     # Without this, the old record is still genuinely live by the liveness predicate, the new
@@ -244,6 +256,57 @@ def _register_locked(args, repo: str) -> int:
         if p.session_id != args.session and p.pane == pane and pane
         and p.claude_pid is not None and p.claude_pid == args.pid
     ]
+    inherited = prior or (superseded[0] if superseded else None)
+
+    detected_engine, detected_pid = None, None
+    if not inherited and (args.pid is None or not getattr(args, "engine", None)):
+        detected_pid = procio.claude_ancestor()
+        if detected_pid is not None:
+            detected_engine = "claude"
+        else:
+            detected_pid = procio.codex_ancestor()
+            if detected_pid is not None:
+                detected_engine = "codex"
+    engine = (getattr(args, "engine", None) or
+              (inherited.engine if inherited else detected_engine) or "claude")
+    session_pid = (args.pid if args.pid is not None else
+                   (inherited.claude_pid if inherited else
+                    (detected_pid if detected_engine == engine else
+                     (procio.codex_ancestor() if engine == "codex"
+                      else procio.claude_ancestor()))))
+
+    # The shared daemon identifies none of the sessions attached to it, whether its pid came
+    # from --pid or from a record that already held it. An unreadable command line for a live
+    # pid is not evidence that it is something else (hostile fix-diff pass on #11).
+    # Any engine: a caller cannot make the daemon a session by declaring --engine claude.
+    if session_pid is not None:
+        argv = procio.argv_of(session_pid)
+        if procio.is_codex_server(argv) or (engine == "codex" and argv is None
+                                            and procio.start_of(session_pid)):
+            print(f"session-coord: not registered. {session_pid} is Codex's shared app-server "
+                  "daemon, or a process whose command line could not be read; the daemon is "
+                  "shared by every attached session and identifies none of them. Pass the pid "
+                  "of this session's own codex process.", file=sys.stderr)
+            return 2
+
+    # Liveness accepts a Codex record only when its pid is the codex process the pane scan finds.
+    # A record with any other pid -- the npm launcher, the daemon -- is saved, reads as dead,
+    # and the next sweep deletes it, so registration "succeeded" and nobody could see the
+    # session. Refuse at the one moment both numbers are in hand. Claude records are left
+    # alone: their hook has been reliable, and this check has only been exercised for Codex.
+    if engine == "codex" and pane and session_pid is not None:
+        table = tmuxio.panes()
+        info = (table or {}).get(pane)
+        seen = info["claude_pid"] if info else None
+        # An int only: None is an empty pane and UNKNOWN_PID a failed read, neither a contradiction.
+        if isinstance(seen, int) and not isinstance(seen, bool) and seen != session_pid:
+            print(f"session-coord: not registered. Pane {pane} holds Codex process {seen}, not "
+                  f"{session_pid}; a record naming {session_pid} would read as dead and be "
+                  f"swept. Pass --pid {seen} if that pane is this session.", file=sys.stderr)
+            return 2
+
+    # Removed only now, after every refusal above: a refused register must leave the record
+    # it would have replaced (hostile fix-diff pass on #11).
     for old in superseded:
         # NO MAIL REBIND HERE, and its absence is deliberate rather than an oversight.
         #
@@ -264,24 +327,6 @@ def _register_locked(args, repo: str) -> int:
         # you believe a rebind that silently loses mail is better than one that visibly never
         # ran. See A-W552.
         store.remove(repo, old.session_id)
-    inherited = prior or (superseded[0] if superseded else None)
-
-    detected_engine, detected_pid = None, None
-    if not inherited and (args.pid is None or not getattr(args, "engine", None)):
-        detected_pid = procio.claude_ancestor()
-        if detected_pid is not None:
-            detected_engine = "claude"
-        else:
-            detected_pid = procio.codex_ancestor()
-            if detected_pid is not None:
-                detected_engine = "codex"
-    engine = (getattr(args, "engine", None) or
-              (inherited.engine if inherited else detected_engine) or "claude")
-    session_pid = (args.pid if args.pid is not None else
-                   (inherited.claude_pid if inherited else
-                    (detected_pid if detected_engine == engine else
-                     (procio.codex_ancestor() if engine == "codex"
-                      else procio.claude_ancestor()))))
 
     cwd = os.path.realpath(os.path.expanduser(args.cwd or os.getcwd()))
     p = Presence(
@@ -994,7 +1039,10 @@ def cmd_msg(args) -> int:
               f"({sender_rec.session_id}). The doorbell budget is per session, so it is taken "
               "from the pane rather than from an argument. Drop --session.", file=sys.stderr)
         return 2
-    sender_id = sender_rec.session_id if sender_rec else ""
+    # An unregistered Codex under the shared daemon has no record, but it does have a thread
+    # id; charging that keeps it inside the budget (hostile pass on PR #11, finding 3). Before
+    # the daemon fix it was charged to whoever owned the daemon's pane, which was wrong too.
+    sender_id = sender_rec.session_id if sender_rec else _codex_thread()
     override = (getattr(args, "override", "") or "").strip()
 
     # File the body in the recipient's inbox FIRST, then ring. The message is DELIVERED the
@@ -1199,15 +1247,68 @@ def cmd_lock(args) -> int:
         return 75  # EX_TEMPFAIL: retryable, and distinguishable from the command's own codes
 
 
+def _env_pane() -> str | None:
+    """The pane this command's environment names, unless that environment is not its own.
+
+    Under Codex's shared app-server daemon, `TMUX_PANE` is the pane of whichever TUI started
+    the daemon. Trusting it there made a second Codex session read, send and claim as the
+    first one, so it is treated as absent and identity comes from the thread id instead.
+    """
+    if procio.codex_server_above():
+        return None
+    return os.environ.get("TMUX_PANE") or None
+
+
+def _codex_thread() -> str:
+    """The Codex thread id a Codex tool command carries, or "" when the caller is not Codex.
+
+    Codex exports it per thread even inside the shared daemon, which makes it the one fact in
+    a daemon tool's environment that belongs to the caller. A Claude started from a Codex tool
+    inherits it too, so it counts only when the nearest engine above us is Codex.
+    """
+    found = procio.nearest_engine()
+    if found is None or found[0] == "claude":
+        return ""
+    return os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or ""
+
+
 def _me(repo: str | None) -> Presence | None:
     """This session's own presence record, found by pane."""
     if not repo:
         return None
-    pane = os.environ.get("TMUX_PANE")
+    pane = _env_pane()
     records = _live(store.load_all(repo))
     if pane:
         return next((p for p in records if p.pane == pane), None)
+    return _mine_without_pane(records)
+
+
+def _mine_without_pane(records) -> Presence | None:
+    """Identity when no trustworthy pane exists: the Codex thread id, then pid and start time."""
+    thread = _codex_thread()
+    if thread:
+        found = next((p for p in records if p.session_id == thread), None)
+        if found is not None and _still_live(found):
+            return found
+    if procio.under_codex_server():
+        # The pid fallback would find the shared daemon, which every attached thread has as its
+        # ancestor, and so name the first of them for all (Copilot on #11).
+        return None
     return _mine_by_pid(records)
+
+
+def _still_live(p: Presence) -> bool:
+    """Is the STORED record for `p` live by the sweep's own rule?
+
+    A thread id names a conversation, not a process. A resumed thread carries the id of a
+    record its former TUI left behind; `_live` has already blanked that record's pane, so it is
+    judged here from disk. Accepting it let a claim succeed against a session the next sweep
+    deletes (hostile pass on PR #11, finding 2).
+    """
+    raw = next((r for r in store.load_all(p.repo_root) if r.session_id == p.session_id), p)
+    pids = [raw.claude_pid] if raw.claude_pid is not None and not raw.pane else []
+    return liveness.is_live(raw, tmuxio.claude_pids(), tmuxio.server_pid(),
+                            procio.starts(pids) if pids else {})
 
 
 def _mine_by_pid(records) -> Presence | None:
@@ -1218,6 +1319,11 @@ def _mine_by_pid(records) -> Presence | None:
     """
     for pid in (procio.claude_ancestor(), procio.codex_ancestor()):
         if pid is None:
+            continue
+        # The shared daemon is an ancestor of every thread attached to it, so a record naming
+        # it names none of them. Skipped wherever the caller sits, including a Claude below a
+        # daemon tool (hostile fix-diff pass on #11, finding 1).
+        if procio.is_codex_server(procio.argv_of(pid)):
             continue
         started = procio.start_of(pid)
         found = next((p for p in records if not p.pane and p.claude_pid == pid
@@ -1264,7 +1370,7 @@ def _me_anywhere(repo: str | None) -> Presence | None:
             return False
         return p.pane == pane and (not p.tmux_server or p.tmux_server == server)
 
-    pane = os.environ.get("TMUX_PANE")
+    pane = _env_pane()
     here = _me(repo)
     if not pane:
         # Outside tmux, identity is the pid-and-start-time match `_me` already made; there is
@@ -1274,7 +1380,7 @@ def _me_anywhere(repo: str | None) -> Presence | None:
         for other in store.known_repos():
             if repo and other == repo:
                 continue
-            found = _mine_by_pid(store.load_all(other))
+            found = _mine_without_pane(store.load_all(other))
             if found is not None:
                 return found
         return None
@@ -1498,7 +1604,7 @@ def cmd_harvest(args) -> int:
     if not path and repo:
         rec = next((p for p in store.load_all(repo) if p.session_id == session), None)
         if rec is None and not session:
-            pane = os.environ.get("TMUX_PANE")
+            pane = _env_pane()
             rec = next((p for p in store.load_all(repo) if pane and p.pane == pane), None)
         path = rec.transcript if rec else ""
     if not path:
