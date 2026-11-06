@@ -47,3 +47,4 @@ def _no_real_engine_walk(monkeypatch):
     answer; a test about engine ancestry sets its own."""
     from sessioncoord import procio
     monkeypatch.setattr(procio, "nearest_engine", lambda pid=None: None)
+    monkeypatch.setattr(procio, "codex_server_above", lambda pid=None: False)

@@ -221,9 +221,26 @@ def nearest_engine(pid: int | None = None) -> tuple[str, int] | None:
 
 
 def under_codex_server(pid: int | None = None) -> bool:
-    """True when the caller runs under Codex's shared daemon, whose environment is not its own."""
+    """True when the NEAREST engine is Codex's shared daemon: the caller is one of its tools."""
     found = nearest_engine(pid)
     return found is not None and found[0] == "codex-server"
+
+
+def codex_server_above(pid: int | None = None) -> bool:
+    """True when any ancestor is Codex's shared daemon, however near another engine is.
+
+    A Claude started by a daemon tool inherits the daemon's `TMUX_PANE` as well, so the
+    question "is this environment mine?" cannot stop at the nearest engine (Copilot on #11).
+    """
+    pid = os.getpid() if pid is None else pid
+    for _ in range(32):
+        ppid = parent_of(pid)
+        if ppid is None or ppid <= 1:
+            return False
+        if is_codex_server(argv_of(ppid)):
+            return True
+        pid = ppid
+    return False
 
 
 def claude_ancestor(pid: int | None = None) -> int | None:

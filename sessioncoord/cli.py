@@ -1237,7 +1237,7 @@ def _env_pane() -> str | None:
     the daemon. Trusting it there made a second Codex session read, send and claim as the
     first one, so it is treated as absent and identity comes from the thread id instead.
     """
-    if procio.under_codex_server():
+    if procio.codex_server_above():
         return None
     return os.environ.get("TMUX_PANE") or None
 
@@ -1273,6 +1273,10 @@ def _mine_without_pane(records) -> Presence | None:
         found = next((p for p in records if p.session_id == thread), None)
         if found is not None and _still_live(found):
             return found
+    if procio.under_codex_server():
+        # The pid fallback would find the shared daemon, which every attached thread has as its
+        # ancestor, and so name the first of them for all (Copilot on #11).
+        return None
     return _mine_by_pid(records)
 
 

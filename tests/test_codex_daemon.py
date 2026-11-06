@@ -21,8 +21,9 @@ from sessioncoord import cli, procio, store
 from sessioncoord.model import Presence, RepoFacts
 
 ROOT = Path(__file__).resolve().parents[1]
-# Captured at import, before the suite's autouse fixture replaces it with a neutral stub.
+# Captured at import, before the suite's autouse fixture replaces them with neutral stubs.
 _real_nearest = procio.nearest_engine
+_real_server_above = procio.codex_server_above
 DAEMON = ["/home/u/.codex/packages/app-server-daemon/releases/0.167.0/bin/codex",
           "app-server", "--listen", "unix://", "--managed-daemon"]
 
@@ -102,6 +103,7 @@ def world(tmp_path, monkeypatch):
 
 def _under_daemon(monkeypatch):
     monkeypatch.setattr(procio, "nearest_engine", lambda pid=None: ("codex-server", 1352327))
+    monkeypatch.setattr(procio, "codex_server_above", lambda pid=None: True)
     monkeypatch.setattr(cli.procio, "codex_ancestor", lambda pid=None: 1352327)
     monkeypatch.setenv("TMUX_PANE", "%183")
 
@@ -170,3 +172,33 @@ def test_an_unregistered_daemon_sender_is_charged_by_thread_id(world, monkeypatc
     monkeypatch.setattr(cli.tmuxio, "send", lambda *a, **k: None)
     cli.main(["msg", "%7", "hello"])
     assert seen and set(seen) == {"thread-9"}
+
+
+def test_server_above_looks_past_a_nearer_claude(monkeypatch):
+    # Copilot on #11: a Claude started by a daemon tool inherits the daemon's TMUX_PANE too.
+    monkeypatch.setattr(procio, "nearest_engine", _real_nearest)
+    monkeypatch.setattr(procio, "codex_server_above", _real_server_above)
+    _tree(monkeypatch, [["bash"], ["claude"], ["bash"], DAEMON, ["/opt/bin/codex", "go"]])
+    assert procio.nearest_engine(99)[0] == "claude"
+    assert procio.codex_server_above(99) is True
+    _tree(monkeypatch, [["bash"], ["claude"], ["/opt/bin/codex", "go"]])
+    assert procio.codex_server_above(99) is False
+
+
+def test_claude_under_a_daemon_tool_does_not_take_the_daemons_pane(world, monkeypatch):
+    store.save(Presence(session_id="thread-1", repo_root="/w", workdir="/w", pane="%183",
+                        claude_pid=1341719, engine="codex", title="first"))
+    monkeypatch.setattr(procio, "nearest_engine", lambda pid=None: ("claude", 4000))
+    monkeypatch.setattr(procio, "codex_server_above", lambda pid=None: True)
+    monkeypatch.setenv("TMUX_PANE", "%183")
+    assert cli._me("/w") is None
+
+
+def test_no_pid_fallback_under_the_daemon(world, monkeypatch):
+    # Copilot on #11: a pane-less record holding the daemon's pid must not name every thread.
+    store.save(Presence(session_id="thread-1", repo_root="/w", workdir="/w", pane=None,
+                        claude_pid=1352327, engine="codex", title="first",
+                        pid_started="t1352327"))
+    _under_daemon(monkeypatch)
+    monkeypatch.setenv("CODEX_SESSION_ID", "thread-7")
+    assert cli._me("/w") is None
