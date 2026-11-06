@@ -265,3 +265,22 @@ def test_inbox_session_names_compare_as_msg_compares_them(world, capsys):
                                     body="for you", created="2026-11-06T00:00:00+00:00")])
     assert cli.main(["inbox", "--repo", REPO, "--session", "✳ PR1685-Attribs", "--peek"]) == 0
     assert "for you" in capsys.readouterr().out
+
+
+def test_inbox_session_prefers_a_current_title_over_an_alias(world):
+    # Hostile fix-diff pass on #14: msg files by title before alias, so inbox resolves alike.
+    table = {"%2": {"pane": "%2", "window": "bakobo:9", "claude_pid": 2,
+                    "title": "PR1685-attribs brief"},
+             "%3": {"pane": "%3", "window": "bakobo:3", "claude_pid": 3,
+                    "title": "pr1685-attribs"}}
+    world.setattr(cli, "_live_table", lambda: table)
+    store.save(Presence(session_id="e1-other", repo_root=REPO, workdir=REPO, pane="%3",
+                        claude_pid=3, title="pr1685-attribs", tmux_server="999"))
+    assert cli._resolve_session_arg(REPO, "pr1685-attribs") == ("e1-other", "")
+
+
+def test_inbox_session_survives_a_non_string_title(world):
+    bad = Presence.from_dict({"session_id": "bad-0000-x", "repo_root": REPO, "workdir": REPO,
+                              "title": 42})
+    world.setattr(cli.store, "load_all", lambda repo: [bad])
+    assert cli._resolve_session_arg(REPO, "anything")[0] is None

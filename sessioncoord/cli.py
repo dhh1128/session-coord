@@ -1507,9 +1507,15 @@ def _resolve_session_arg(repo: str, given: str) -> tuple[str | None, str]:
     live = _live(records)
     # Names compare as `msg` and held mail compare them, through `_held_key` (case, and a
     # leading status glyph), so an address that works for `msg` works here (Copilot on #14).
+    # And in msg's ORDER: a current title outranks another session's registered alias, so the
+    # address a message was sent to reads the inbox it went to. Non-string names are damage on
+    # disk and match nothing (hostile fix-diff pass on #14).
     key = _held_key(given)
-    by_name = [p for p in live if key and key in
-               {_held_key(n) for n in (p.name, p.title, p.registered_name) if n}]
+
+    def named(fields) -> bool:
+        return bool(key) and key in {_held_key(n) for n in fields if isinstance(n, str) and n}
+    by_name = ([p for p in live if named((p.name, p.title))]
+               or [p for p in live if named((p.registered_name,))])
     # A record whose id is not a string is damage on disk, not a session; skip it rather than
     # crash the one command a session uses to read its mail (hostile pass on #14).
     by_prefix = [p for p in records if len(given) >= 8 and isinstance(p.session_id, str)
