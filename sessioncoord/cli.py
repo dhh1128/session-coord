@@ -1171,7 +1171,11 @@ def cmd_msg(args) -> int:
                                sender=sender, force=args.force)
         except tmuxio.SendUnknown as e:
             # Typing may have delivered this turn. Holding a second copy would risk duplication.
-            print(f"session-coord: send outcome unknown; nothing was filed: {e}",
+            # Say where the text is: a Codex composer has been seen holding it unsubmitted, and
+            # "nothing was filed" alone read as "nothing happened" (handoff, addendum 2).
+            print(f"session-coord: send outcome unknown; nothing was filed: {e}\n"
+                  "  The text was typed into that pane and may be sitting unsubmitted in its "
+                  "prompt. Look at the pane before resending; resending may deliver it twice.",
                   file=sys.stderr)
             return 2
         except tmuxio.SendRefused as e:
@@ -1220,9 +1224,15 @@ def cmd_msg(args) -> int:
         print(f"session-coord: {e}", file=sys.stderr)
         return 75
     hours = int(store.HELD_TTL.total_seconds() // 3600)
-    print(f"held for {args.target}; it will be delivered at the start of the next turn of "
-          f"a session with that name, if one takes a turn within {hours} hours, and dropped "
-          f"after that ({refused})")
+    # The outcome first and on its own line, then only the first line of why it was held. The
+    # reason used to follow in parentheses, and a budget refusal is many lines ending in
+    # --override advice, so `| tail -3` showed only that advice: a successful hold read as a
+    # failure and was sent again, and the peer got the message three times (handoff V8).
+    print(f"held for {args.target}: it will be delivered at the start of the next turn of a "
+          f"session with that name, if one takes a turn within {hours} hours, and dropped "
+          "after that. Do not resend it.")
+    why = (refused or "").strip().splitlines()
+    print(f"  (not typed directly: {why[0] if why else 'no reason given'})")
     return 0
 
 
