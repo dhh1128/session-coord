@@ -743,6 +743,16 @@ class _Doorbell:
 MSG_STDIN_LIMIT = 256 * 1024
 
 
+def _reply_address(value: str) -> str:
+    """A remote sender's reply address, or "" when it is not one.
+
+    It is printed as a command to paste, so only the shape `_msg_remote` sends is accepted:
+    a session id and a host name, nothing a shell would expand.
+    """
+    v = (value or "").strip()
+    return v if re.fullmatch(r"[A-Za-z0-9._-]{1,128}@[A-Za-z0-9._-]{1,64}", v) else ""
+
+
 def _msg_remote(args, name: str, host) -> int:
     """`msg name@host`: hand the message to session-coord on that box, body on stdin.
 
@@ -798,8 +808,11 @@ def _msg_remote(args, name: str, host) -> int:
         proc = remote._spawn(remote.remote_argv(host, *argv), stdin=body)
         out, err = proc.communicate(body, timeout=20)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
+        remote._kill(proc)
+        try:
+            proc.wait(timeout=1.0)  # not communicate(): a forked child may hold the pipes
+        except subprocess.TimeoutExpired:
+            pass
         print(f"session-coord: {host.name} did not answer within 20s; the message may or may "
               "not have been filed there.", file=sys.stderr)
         return 2
@@ -1016,7 +1029,7 @@ def cmd_msg(args) -> int:
                 queue = list(queue) + [inbox_mod.Message(
                     id=f"{_now()}-{os.getpid()}-{len(queue)}",
                     sender=sender or "a peer", recipient=recipient.session_id,
-                    sender_name=me.name if me else (args.sender_name or ""),
+                    sender_name=me.name if me else _reply_address(args.sender_name),
                     body=args.text, created=_now(), subject=args.subject or "",
                     reply=reply)]
                 store.save_inbox(recipient_repo, queue)
@@ -1118,7 +1131,7 @@ def cmd_msg(args) -> int:
             queue, _ = store.unexpired_held(queue)
             queue.append(inbox_mod.Message(
                 id=f"held-{uuid.uuid4().hex}", sender=sender or "a peer", recipient=key,
-                sender_name=me.name if me else (args.sender_name or ""), body=args.text,
+                sender_name=me.name if me else _reply_address(args.sender_name), body=args.text,
                 created=_now(),
                 subject=args.subject or "", reply=reply))
             store.save_held(queue)

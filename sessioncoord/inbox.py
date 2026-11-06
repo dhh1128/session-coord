@@ -27,6 +27,7 @@ Pure over the queue; `store` owns the files.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -199,6 +200,9 @@ def render(messages: Sequence[Message], marked_read: bool = True, you: str = "")
     state = "Marked read." if marked_read else "Still unread -- this was a peek."
     names = sorted({m.sender_name for m in messages if m.sender_name})
     to = names[0] if len(names) == 1 else "<their name>"
-    out.append(f"{state} Reply by name, not by window: `session-coord msg \"{_safe(to)}\" "
+    # Single-quoted for the shell, never double: the hint is meant to be pasted, and inside
+    # double quotes a name carrying `$(...)` or a backtick runs (hostile pass on PR #12).
+    quoted = _safe(to) if to == "<their name>" else shlex.quote(_safe(to))
+    out.append(f"{state} Reply by name, not by window: `session-coord msg {quoted} "
                "\"...\"`.")
     return "\n".join(out) + "\n"

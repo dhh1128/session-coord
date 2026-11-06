@@ -80,7 +80,9 @@ def test_the_inbox_says_who_you_are_and_how_to_reply(board, monkeypatch, capsys)
     cli.main(["inbox", "--repo", REPO])
     out = capsys.readouterr().out
     assert "You are more-adapters, now in window infra:6" in out
-    assert 'session-coord msg "conf-suite-open"' in out
+    # Shell-quoted, so a name needing no quotes gets none; double quotes would let a name
+    # carrying `$(...)` run when the hint is pasted (hostile pass on PR #12).
+    assert "session-coord msg conf-suite-open " in out
 
 
 def test_titles_drop_claude_codes_status_glyph():

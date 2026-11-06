@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -188,9 +189,27 @@ def remote_argv(host: Host, *args: str) -> list[str]:
 
 
 def _spawn(argv: list[str], stdin: bytes | None = None) -> subprocess.Popen:
+    # Its own process group, so a kill reaches anything ssh forked: a child that inherited
+    # the pipes would otherwise keep a reader blocked after ssh itself is dead.
     return subprocess.Popen(argv, stdin=subprocess.PIPE if stdin is not None
                             else subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=True)
+
+
+def _kill(proc) -> None:
+    """Kill the process and its group; a fake or an already-reaped process just gets kill()."""
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+            return
+        except (OSError, AttributeError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
 
 
 def cache_dir() -> Path:
@@ -369,15 +388,17 @@ def fetch(hosts: list[Host], deadline: float = DEADLINE, net=None) -> tuple[list
         t.join(max(0.0, end - time.monotonic()))
     late = {name for name in live if name not in answers}
     for name in late:
-        live[name].kill()
+        _kill(live[name])
+    # One grace period shared by every thread, not half a second each.
+    grace = time.monotonic() + 0.5
     for t in threads:
-        t.join(0.5)
+        t.join(max(0.0, grace - time.monotonic()))
     for name, proc in live.items():
         got = None if name in late else answers.get(name)
         if got is None:
-            proc.kill()
+            _kill(proc)
             try:
-                proc.wait(timeout=0.5)  # reap it; its reader thread owns the pipes
+                proc.wait(timeout=0.1)  # reap it; its reader thread owns the pipes
             except subprocess.TimeoutExpired:
                 pass
             views[name] = HostView(name, problem=f"no answer within {deadline:g}s")

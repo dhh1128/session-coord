@@ -419,3 +419,32 @@ class TestCopilotOnPR12:
         monkeypatch.setattr(remote, "origin_of", lambda r: "o" + r)
         trees = cli._estate_view()["worktrees"]
         assert [t["path"] for t in trees] == ["/sc/.worktrees/x"]
+
+
+class TestHostileOn80ba191:
+    @pytest.mark.parametrize("bad", ["$(printf INJECTED)@origin", "`id`@h", "a b@h",
+                                     "x@h;rm", "nohost", "@h"])
+    def test_a_reply_address_must_have_the_shape_we_send(self, bad):
+        assert cli._reply_address(bad) == ""
+
+    def test_the_shape_we_send_is_kept(self):
+        assert cli._reply_address("26893436-dd0f-4c7c@sumago") == "26893436-dd0f-4c7c@sumago"
+
+    def test_the_reply_hint_is_single_quoted_for_the_shell(self):
+        from sessioncoord import inbox
+        m = inbox.Message(id="1", sender="x", recipient="r", sender_name="it's $(x)",
+                          body="hi", created="2026-11-06T00:00:00+00:00")
+        out = inbox.render([m])
+        assert "msg 'it'\"'\"'s $(x)'" in out
+
+    def test_children_holding_the_pipes_do_not_stretch_the_deadline(self, home, monkeypatch):
+        import sys
+        # The child forks a grandchild that inherits stdout and outlives it.
+        fork = [sys.executable, "-c",
+                "import os, time\nif os.fork() == 0:\n    time.sleep(30)\nelse:\n    time.sleep(30)"]
+        monkeypatch.setattr(remote, "remote_argv", lambda h, *a: fork)
+        t0 = time.monotonic()
+        views, _ = remote.fetch([remote.Host(f"h{i}") for i in range(6)], deadline=0.2,
+                                net={})
+        assert time.monotonic() - t0 < 1.5
+        assert all("no answer" in v.problem for v in views)
