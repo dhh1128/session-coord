@@ -243,7 +243,7 @@ def _load_cache(host: str) -> tuple[list[dict], list[dict], str] | None:
         return None
 
 
-def is_ledger(repo_root: str | None, path: str | None) -> bool:
+def is_ledger(repo_root: str | None, path: str | None, branch: str | None) -> bool:
     """Whether `path` is the tick ledger's worktree, `<repo>/.tick` on branch `tick`.
 
     tick keeps its ledger in a worktree of the repo it tracks, so every repo with a ledger has
@@ -251,7 +251,9 @@ def is_ledger(repo_root: str | None, path: str | None) -> bool:
     abandoned branch on every board. Checked on the receiving side as well as the sending
     side, because a peer on an older version still sends it.
     """
-    if not path:
+    # Both, not the path alone: a worktree someone happens to put at .tick on a branch of
+    # their own is work, and hiding it is the failure this view exists to prevent.
+    if not path or branch != "tick":
         return False
     head, tail = os.path.split(path.rstrip("/"))
     if tail != ".tick":
@@ -535,7 +537,7 @@ def render(views: list[HostView], origin: str, note: str = "", show_all: bool = 
         busy = {s.get("workdir") for s in v.sessions}
         for t in v.worktrees:
             if (origin and t.get("origin") == origin and t.get("path") not in busy
-                    and not is_ledger(t.get("repo_root"), t.get("path"))):
+                    and not is_ledger(t.get("repo_root"), t.get("path"), t.get("branch"))):
                 lines.append(f"  {v.host}: worktree {t.get('path')}  "
                              f"({t.get('branch') or 'detached'}), no session registered in it")
         if show_all:

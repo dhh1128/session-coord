@@ -422,7 +422,7 @@ def _estate_view() -> dict:
         origin = remote.origin_of(repo)
         for path, branch in gitio.worktrees(repo):
             if (os.path.realpath(path) != os.path.realpath(repo)
-                    and not remote.is_ledger(repo, path)):
+                    and not remote.is_ledger(repo, path, branch)):
                 trees.append({"repo_root": repo, "origin": origin, "path": path,
                               "branch": branch})
     return {"host": remote.local_host(), "sessions": out, "worktrees": trees}

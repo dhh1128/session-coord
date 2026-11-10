@@ -443,12 +443,22 @@ class TestTheTickLedgerIsNotAWorktree:
         out = remote.render([v], "o")
         assert ".tick" not in out and "/home/d/sc/.worktrees/y" in out
 
-    @pytest.mark.parametrize("root,path,want", [
-        ("/r", "/r/.tick", True), ("/r", "/r/.tick/", True), (None, "/r/.tick", True),
-        ("/r", "/r/.worktrees/.tick", False), ("/r", "/r/.worktrees/tick", False),
-        ("/r", "/other/.tick", False), ("/r", None, False)])
-    def test_only_the_ledger_at_the_repo_root_matches(self, root, path, want):
-        assert remote.is_ledger(root, path) is want
+    @pytest.mark.parametrize("root,path,branch,want", [
+        ("/r", "/r/.tick", "tick", True), ("/r", "/r/.tick/", "tick", True),
+        (None, "/r/.tick", "tick", True),
+        ("/r", "/r/.worktrees/.tick", "tick", False), ("/r", "/r/.worktrees/tick", "tick", False),
+        ("/r", "/other/.tick", "tick", False), ("/r", None, "tick", False),
+        # Hostile pass on 4aab62e: a worktree at .tick on a branch of its own is work.
+        ("/r", "/r/.tick", "feature/payments", False), ("/r", "/r/.tick", "", False),
+        ("/r", "/r/.tick", None, False)])
+    def test_only_the_ledger_at_the_repo_root_matches(self, root, path, branch, want):
+        assert remote.is_ledger(root, path, branch) is want
+
+    def test_a_worktree_at_dot_tick_on_another_branch_is_still_shown(self):
+        v = remote.HostView("kelun", worktrees=[
+            {"repo_root": "/repo", "origin": "o", "path": "/repo/.tick",
+             "branch": "feature/payments"}])
+        assert "/repo/.tick  (feature/payments)" in remote.render([v], "o")
 
 
 class TestHostileOn80ba191:
