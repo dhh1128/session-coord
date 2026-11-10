@@ -8,6 +8,8 @@ neither the held mail nor `msg pr1685-attribs` could ever find them again.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from sessioncoord import cli, store
@@ -37,7 +39,9 @@ def test_held_mail_for_the_registered_name_is_delivered(world, capsys):
     from sessioncoord.inbox import Message
     store.save_held(list(held) + [Message(id="held-1", sender="keripy-tls-pin",
                                           recipient="pr1685-attribs", body="DeclRecord note",
-                                          created="2026-11-05T22:34:57+00:00")])
+                                          # Now, not a literal: held mail expires after 72
+                                          # hours, and a fixed date made this fail from 11-08.
+                                          created=datetime.now(timezone.utc).isoformat())])
     assert cli.main(["inbox", "--repo", REPO, "--session", "d0e290a3-0000"]) == 0
     assert "DeclRecord note" in capsys.readouterr().out
     assert store.load_held() == []

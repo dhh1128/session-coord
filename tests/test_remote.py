@@ -421,6 +421,46 @@ class TestCopilotOnPR12:
         assert [t["path"] for t in trees] == ["/sc/.worktrees/x"]
 
 
+class TestTheTickLedgerIsNotAWorktree:
+    """2026-11-06: the first live board --hosts listed each repo's .tick ledger as a
+    worktree with no session in it, which every board would repeat forever."""
+
+    def test_the_sender_leaves_it_out(self, monkeypatch):
+        from sessioncoord import gitio, store
+        monkeypatch.setattr(store, "known_repos", lambda: ["/sc"])
+        monkeypatch.setattr(store, "load_all", lambda repo: [])
+        monkeypatch.setattr(gitio, "worktrees", lambda r, run=None: [
+            ("/sc", "main"), ("/sc/.tick", "tick"), ("/sc/.worktrees/x", "x")])
+        monkeypatch.setattr(remote, "origin_of", lambda r: "o")
+        assert [t["path"] for t in cli._estate_view()["worktrees"]] == ["/sc/.worktrees/x"]
+
+    def test_the_receiver_leaves_it_out_when_an_older_peer_sends_it(self):
+        v = remote.HostView("kelun", worktrees=[
+            {"repo_root": "/home/d/sc", "origin": "o", "path": "/home/d/sc/.tick",
+             "branch": "tick"},
+            {"repo_root": "/home/d/sc", "origin": "o", "path": "/home/d/sc/.worktrees/y",
+             "branch": "y"}])
+        out = remote.render([v], "o")
+        assert ".tick" not in out and "/home/d/sc/.worktrees/y" in out
+
+    @pytest.mark.parametrize("root,path,branch,want", [
+        ("/r", "/r/.tick", "tick", True), ("/r", "/r/.tick/", "tick", True),
+        (None, "/r/.tick", "tick", True),
+        ("/r", "/r/.worktrees/.tick", "tick", False), ("/r", "/r/.worktrees/tick", "tick", False),
+        ("/r", "/other/.tick", "tick", False), ("/r", None, "tick", False),
+        # Hostile pass on 4aab62e: a worktree at .tick on a branch of its own is work.
+        ("/r", "/r/.tick", "feature/payments", False), ("/r", "/r/.tick", "", False),
+        ("/r", "/r/.tick", None, False)])
+    def test_only_the_ledger_at_the_repo_root_matches(self, root, path, branch, want):
+        assert remote.is_ledger(root, path, branch) is want
+
+    def test_a_worktree_at_dot_tick_on_another_branch_is_still_shown(self):
+        v = remote.HostView("kelun", worktrees=[
+            {"repo_root": "/repo", "origin": "o", "path": "/repo/.tick",
+             "branch": "feature/payments"}])
+        assert "/repo/.tick  (feature/payments)" in remote.render([v], "o")
+
+
 class TestHostileOn80ba191:
     @pytest.mark.parametrize("bad", ["$(printf INJECTED)@origin", "`id`@h", "a b@h",
                                      "x@h;rm", "nohost", "@h"])
