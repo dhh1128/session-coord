@@ -708,8 +708,11 @@ class _Doorbell:
       serialise the one pair that needs it: two sends from the same session in different repos.
     """
 
-    def __init__(self, repo, sender_id, target, reply, override):
+    def __init__(self, repo, sender_id, target, reply, override, worker=""):
         self.repo = repo
+        # The recipient's session id when this is a manager ringing its own worker
+        # (`msg --worker`, passed by `zamu tell`), else empty: which counter is charged.
+        self.worker = worker
         self.sender_id = sender_id
         self.target = target
         self.reply = reply
@@ -745,15 +748,17 @@ class _Doorbell:
                                 "spent. Repair or remove that file, or pass --override if this "
                                 "must interrupt now.")
                 if log is not None:
-                    recent = comms.spent(log, self.sender_id, now)
+                    recent = comms.spent(log, self.sender_id, now, worker=self.worker)
                     if len(recent) >= comms.BUDGET_PER_HOUR and not self.override:
-                        return comms.refusal(recent, now)
+                        return comms.refusal(recent, now, worker=bool(self.worker))
                 self.charge = comms.Sent(session_id=self.sender_id, target=self.target, at=now,
                                          reply=self.reply, override=self.override,
-                                         id=f"{now:.6f}-{os.getpid()}")
+                                         id=f"{now:.6f}-{os.getpid()}",
+                                         worker=self.worker)
                 store.record_send(self.repo, self.charge)
                 try:
-                    self.left = comms.remaining(store.load_sends(self.repo), self.sender_id, now)
+                    self.left = comms.remaining(store.load_sends(self.repo), self.sender_id, now,
+                                                worker=self.worker)
                 except store.UnreadableSends:
                     self.left = None
         except locks.Busy as e:
@@ -790,7 +795,8 @@ class _Doorbell:
             return ""
         if self.left is None:
             return "  [budget unreadable; it was charged]"
-        return f"  [{self.left} of {comms.BUDGET_PER_HOUR} doorbells left this hour]"
+        which = " for this worker" if self.worker else ""
+        return f"  [{self.left} of {comms.BUDGET_PER_HOUR} doorbells left this hour{which}]"
 
 
 # A message is prose for a peer's context, not a payload. Bounded so a runaway pipe cannot
@@ -1148,7 +1154,10 @@ def cmd_msg(args) -> int:
             print(f"filed for {recipient.label}, but the doorbell could not be rung (no "
                   f"doorbell was charged): {e}", file=sys.stderr)
             return 0
-        bell = _Doorbell(repo, sender_id, args.target, reply, override)
+        # `--worker` takes effect only here, where the recipient is a registered session and so
+        # has an id to key the pair on. Elsewhere it is ignored and the ordinary budget pays.
+        bell = _Doorbell(repo, sender_id, args.target, reply, override,
+                         worker=recipient.session_id if getattr(args, "worker", False) else "")
         refused = bell.reserve()
         if refused:
             print(f"filed for {recipient.label}, and NOT rung: {refused}", file=sys.stderr)
@@ -1859,6 +1868,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="whether an answer is wanted. Default none, and the body carries a marker saying so -- acknowledgement is not collegial, it is a turn.")
     m.add_argument("--override", default="",
                    help="one line saying what breaks if this waits; rings past the budget and records the reason.")
+    m.add_argument("--worker", action="store_true",
+                   help="the target is a worker this session manages (passed by `zamu tell`): "
+                        "charge the ring to a separate budget of 3 an hour for that worker, "
+                        "leaving this session's own budget for everyone else. Registered "
+                        "recipients only; otherwise ignored.")
     m.add_argument("--no-ring", dest="no_ring", action="store_true",
                    help=argparse.SUPPRESS)  # file without ringing: set by a remote sender
     m.add_argument("--sender-name", dest="sender_name", default="",

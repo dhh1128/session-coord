@@ -686,3 +686,97 @@ class TestAStalePaneRecordCannotAbsorbTheCharge:
         reg("peer", "%2", 222, "me:2")
         cli.main(["msg", "peer", "hello", "--repo", "/repo"])
         assert any(s.session_id == "legacy" for s in store.load_sends("/repo"))
+
+
+class TestAManagersRingsToItsWorkersHaveTheirOwnBudget:
+    """2026-11-12: a PM managing two workers through a merge sequence rang one worker twice and
+    the other once inside ten minutes. Then a peer needed a question and a worker needed its go
+    signal, and the PM's one estate-wide budget was spent: one message sat unrung and the other
+    needed --override. A worker idle at its prompt does not see filed mail until something
+    rings, so an unrung "go" stalls the plan.
+
+    `msg --worker` charges a ring to a counter for that (sender, recipient) pair, 3 an hour,
+    and leaves the sender's ordinary budget for everyone else. Per worker rather than pooled
+    (3N shared), so a looping manager cannot spend every ring on one worker and worker traffic
+    cannot starve its messages to peers. Nothing verifies the relation: the threat is a looping
+    session, not a lying one, and only `zamu tell` passes the flag."""
+
+    def spend_general(self):
+        for i in range(comms.BUDGET_PER_HOUR):
+            send(f"m{i}")
+            store.save_inbox("/repo", [])
+
+    def test_worker_rings_do_not_spend_the_ordinary_budget(self, home, fake_world, rings):
+        pair()
+        for i in range(comms.BUDGET_PER_HOUR):
+            assert cli.main(["msg", "peer", f"go {i}", "--repo", "/repo", "--worker"]) == 0
+            store.save_inbox("/repo", [])
+        assert comms.remaining(store.load_sends("/repo"), "sender",
+                               now=time.time()) == comms.BUDGET_PER_HOUR
+
+    def test_a_spent_ordinary_budget_still_lets_a_worker_be_rung(self, home, fake_world, rings,
+                                                                  capsys):
+        pair()
+        self.spend_general()
+        rings.clear()
+        assert cli.main(["msg", "peer", "go: merge now", "--repo", "/repo", "--worker"]) == 0
+        assert len(rings) == 1
+        assert "for this worker" in capsys.readouterr().out
+
+    def test_each_worker_has_its_own_three(self, home, fake_world, rings, monkeypatch):
+        pair()
+        reg("worker2", "%3", 333, "me:3")
+        monkeypatch.setattr(cli.tmuxio, "claude_pids",
+                            lambda run=None: {"%1": 111, "%2": 222, "%3": 333})
+        for i in range(comms.BUDGET_PER_HOUR):
+            cli.main(["msg", "peer", f"a{i}", "--repo", "/repo", "--worker"])
+            store.save_inbox("/repo", [])
+        rings.clear()
+        assert cli.main(["msg", "worker2", "b", "--repo", "/repo", "--worker"]) == 0
+        assert len(rings) == 1, "one worker's spent budget must not touch another's"
+
+    def test_one_worker_cannot_take_all_the_rings(self, home, fake_world, rings, capsys):
+        # The harm the pooled form allows: a looping manager ringing one worker 3N times.
+        pair()
+        for i in range(comms.BUDGET_PER_HOUR):
+            cli.main(["msg", "peer", f"a{i}", "--repo", "/repo", "--worker"])
+            store.save_inbox("/repo", [])
+        rings.clear()
+        capsys.readouterr()
+        assert cli.main(["msg", "peer", "again", "--repo", "/repo", "--worker"]) == 0
+        assert rings == []
+        err = capsys.readouterr().err
+        assert "NOT rung" in err and "this worker" in err
+        assert any("again" in m.body for m in store.load_inbox("/repo")), "still filed"
+
+    def test_the_pair_is_keyed_on_the_recipient_session_not_the_address(
+            self, home, fake_world, rings):
+        # Addressing the same worker by pane instead of session id is the same worker.
+        pair()
+        for i, addr in enumerate(["peer", "%2", "peer"]):
+            cli.main(["msg", addr, f"a{i}", "--repo", "/repo", "--worker"])
+            store.save_inbox("/repo", [])
+        rings.clear()
+        cli.main(["msg", "%2", "again", "--repo", "/repo", "--worker"])
+        assert rings == []
+
+    def test_check_reports_only_the_ordinary_budget(self, home, fake_world, rings, capsys):
+        pair()
+        for i in range(comms.BUDGET_PER_HOUR):
+            cli.main(["msg", "peer", f"a{i}", "--repo", "/repo", "--worker"])
+            store.save_inbox("/repo", [])
+        capsys.readouterr()
+        cli.main(["check", "--repo", "/repo"])
+        assert "comms budget" not in capsys.readouterr().out
+
+    def test_a_log_without_the_field_reads_as_ordinary_rings(self):
+        s = comms.Sent.from_dict({"session_id": "a", "target": "x", "at": 1.0})
+        assert s.worker == ""
+        assert len(comms.spent([s], "a", now=2.0)) == 1
+
+    def test_worker_and_ordinary_counters_are_disjoint(self):
+        sends = [comms.Sent("a", "x", 1.0), comms.Sent("a", "w", 1.0, worker="w"),
+                 comms.Sent("a", "v", 1.0, worker="v")]
+        assert len(comms.spent(sends, "a", now=2.0)) == 1
+        assert len(comms.spent(sends, "a", now=2.0, worker="w")) == 1
+        assert comms.remaining(sends, "a", now=2.0, worker="v") == comms.BUDGET_PER_HOUR - 1
