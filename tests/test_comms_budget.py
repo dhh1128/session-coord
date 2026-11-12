@@ -785,3 +785,8 @@ class TestAManagersRingsToItsWorkersHaveTheirOwnBudget:
         with pytest.raises(ValueError, match="worker"):
             comms.Sent.from_dict({"session_id": "a", "target": "x", "at": 1.0,
                                   "worker": ["peer-id"]})
+
+    @pytest.mark.parametrize("bad", [" ", "\t", " peer", "peer\n"])
+    def test_a_blank_or_padded_worker_is_refused(self, bad):
+        with pytest.raises(ValueError, match="worker"):
+            comms.Sent.from_dict({"session_id": "a", "target": "x", "at": 1.0, "worker": bad})
