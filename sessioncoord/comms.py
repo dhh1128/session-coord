@@ -84,11 +84,18 @@ class Sent:
     # it. The failure directions are not symmetric: an uncharged interruption silently raises
     # the limit, while a charge for a ring that did not happen costs one message an hour.
     reverses: str = ""
+    # The recipient's SESSION ID when this ring was charged to a manager's per-worker budget
+    # (`msg --worker`), else empty. A ring with this set is counted only against that
+    # (sender, worker) pair and never against the sender's ordinary budget. Keyed on the
+    # session id rather than the address typed, so ringing one worker by pane and by id is one
+    # worker. An older build that ignores the field counts these as ordinary rings, which errs
+    # toward fewer interruptions, the safe direction.
+    worker: str = ""
 
     def to_dict(self) -> dict:
         return {"session_id": self.session_id, "target": self.target, "at": self.at,
                 "reply": self.reply, "override": self.override, "id": self.id,
-                "reverses": self.reverses}
+                "reverses": self.reverses, "worker": self.worker}
 
     @classmethod
     def from_dict(cls, d) -> "Sent":
@@ -110,6 +117,12 @@ class Sent:
         for k in ("session_id", "target"):
             if not isinstance(d[k], str) or not d[k].strip():
                 raise ValueError(f"send record has an empty or non-string {k}")
+        # A worker that is not a string matched neither counter, so its charge vanished from
+        # both budgets: the same "present is not valid" hole as above (hostile pass on --worker).
+        worker = d.get("worker", "")
+        if not isinstance(worker, str) or (worker and worker != worker.strip()) \
+                or (worker and not worker.strip()):
+            raise ValueError("send record has a non-string or blank-padded worker")
         at = float(d["at"])
         # NaN compares False against everything, so `at > cutoff` was False and the record
         # vanished from the accounting; inf compares True forever, so one would sit in the
@@ -120,7 +133,8 @@ class Sent:
         return cls(session_id=str(d["session_id"]), target=str(d["target"]),
                    at=at, reply=str(d.get("reply", REPLY_NONE)),
                    override=str(d.get("override", "")), id=str(d.get("id", "")),
-                   reverses=str(d.get("reverses", "")))
+                   reverses=str(d.get("reverses", "")),
+                   worker=worker)
 
 
 def check_reply(value: str) -> str:
@@ -161,8 +175,13 @@ class BudgetUnknown(RuntimeError):
 
 
 def spent(sends: Iterable[Sent], session_id: str, now: float,
-          window: int = WINDOW_SECONDS) -> list[Sent]:
+          window: int = WINDOW_SECONDS, worker: str = "") -> list[Sent]:
     """This session's interrupting messages inside the trailing window, newest first.
+
+    `worker` selects the counter. Empty is the sender's ordinary budget, which excludes every
+    per-worker ring; a session id is the manager's budget for ringing that one worker. Per
+    worker rather than one pool of 3N, so a looping manager cannot spend every ring on one
+    worker and its worker traffic cannot starve its messages to peers (2026-11-12).
 
     Overrides count. A message sent past the budget still cost the recipient a turn, so
     excluding it would let a session buy unlimited headroom by declaring each one urgent.
@@ -175,26 +194,29 @@ def spent(sends: Iterable[Sent], session_id: str, now: float,
     cancelled = {s.reverses for s in sends if s.reverses}
     cutoff = now - window
     mine = [s for s in sends
-            if s.session_id == session_id and s.at > cutoff
+            if s.session_id == session_id and s.at > cutoff and s.worker == worker
             and not s.reverses and not (s.id and s.id in cancelled)]
     return sorted(mine, key=lambda s: s.at, reverse=True)
 
 
 def remaining(sends: Iterable[Sent], session_id: str, now: float,
-              budget: int = BUDGET_PER_HOUR, window: int = WINDOW_SECONDS) -> int:
-    return max(0, budget - len(spent(sends, session_id, now, window)))
+              budget: int = BUDGET_PER_HOUR, window: int = WINDOW_SECONDS,
+              worker: str = "") -> int:
+    return max(0, budget - len(spent(sends, session_id, now, window, worker)))
 
 
-def refusal(recent: Sequence[Sent], now: float, budget: int = BUDGET_PER_HOUR) -> str:
+def refusal(recent: Sequence[Sent], now: float, budget: int = BUDGET_PER_HOUR,
+            worker: bool = False) -> str:
     """What to say when the budget is gone. Names what was spent, so triage is possible.
 
     Refusing without showing the messages already sent would be a wall. Showing them turns it
     into the question that matters: which of these mattered less than the one you are about to
     send?
     """
+    which = (f"this hour's budget of {budget} doorbells for this worker"
+             if worker else f"this hour's budget of {budget} interrupting messages")
     lines = [
-        f"You have spent this hour's budget of {budget} interrupting messages. The next one "
-        "has to be worth more than one of these:",
+        f"You have spent {which}. The next one has to be worth more than one of these:",
         "",
     ]
     for s in recent:

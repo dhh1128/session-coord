@@ -132,6 +132,18 @@ contract for "blocking findings only".
 convention — because the convention is what failed: answering felt collegial and cost a turn on
 both sides.
 
+### A manager's rings to its own workers have their own budget
+
+Added 2026-11-12. A zamu PM's whole job is coordination, and `zamu tell` rides on `msg`, so the PM paid for its workers out of the same three an hour as everything else. The incident: a PM managing two workers through a merge sequence rang one twice and the other once inside ten minutes. When a peer then needed a question and a worker needed its go signal to merge, the budget was spent; one message sat unrung and the other needed `--override`. A worker idle at its prompt does not see filed mail until something rings, so an unrung "go" stalls the plan.
+
+**Decision: per worker.** `msg --worker` charges the ring to a counter for that (sender, recipient) pair, three an hour, and the sender keeps its ordinary three an hour for everyone else. The pair is keyed on the recipient's session id, not the address typed, so ringing a worker by pane and by id is one worker. The flag takes effect only for a registered recipient, which is the only case with an id to key on; elsewhere it is ignored and the ordinary budget pays. `check` reports only the ordinary budget.
+
+**Rejected: a pooled budget of 3N**, N being the number of workers, which was Daniel's first proposal. It gives the same total, but a looping manager could spend all 3N rings on one worker, which is the harm the budget exists to prevent, and worker traffic could still starve the manager's messages to peers, which is what happened in the incident. It would also need session-coord to know N, which only zamu knows.
+
+**Rejected: verifying the relation.** The first design had the worker declare its manager from its own pane, so a session could not claim to manage everyone. Daniel asked whether a lying PM was a real threat, and it is not: every session here belongs to one person and none is trying to escape the budget. The realistic risk is a looping session reaching for whatever flag gets it past a refusal, as sessions do with `--override`. So the defence is that only `zamu tell` passes `--worker` and the refusal text never suggests it, not proof against a lie. That removed the declaration, its storage, and its lifecycle across reboots, PM restarts and retired workers. Worker-to-manager traffic needs nothing, because `zamu report` does not ring.
+
+A log written before this field existed reads every ring as ordinary; an older build reading a newer log counts per-worker rings against the sender's ordinary budget. Both err toward fewer interruptions.
+
 ## Mail is delivered into the turn, not waited for
 
 `claude/hooks/session-coord-mail` drains the inbox on every `UserPromptSubmit` and puts it in
