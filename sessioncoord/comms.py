@@ -117,6 +117,10 @@ class Sent:
         for k in ("session_id", "target"):
             if not isinstance(d[k], str) or not d[k].strip():
                 raise ValueError(f"send record has an empty or non-string {k}")
+        # A worker that is not a string matched neither counter, so its charge vanished from
+        # both budgets: the same "present is not valid" hole as above (hostile pass on --worker).
+        if not isinstance(d.get("worker", ""), str):
+            raise ValueError("send record has a non-string worker")
         at = float(d["at"])
         # NaN compares False against everything, so `at > cutoff` was False and the record
         # vanished from the accounting; inf compares True forever, so one would sit in the
@@ -128,7 +132,7 @@ class Sent:
                    at=at, reply=str(d.get("reply", REPLY_NONE)),
                    override=str(d.get("override", "")), id=str(d.get("id", "")),
                    reverses=str(d.get("reverses", "")),
-                   worker=str(d.get("worker", "") or ""))
+                   worker=d.get("worker", ""))
 
 
 def check_reply(value: str) -> str:

@@ -780,3 +780,8 @@ class TestAManagersRingsToItsWorkersHaveTheirOwnBudget:
         assert len(comms.spent(sends, "a", now=2.0)) == 1
         assert len(comms.spent(sends, "a", now=2.0, worker="w")) == 1
         assert comms.remaining(sends, "a", now=2.0, worker="v") == comms.BUDGET_PER_HOUR - 1
+
+    def test_a_non_string_worker_is_refused_rather_than_uncounted(self):
+        with pytest.raises(ValueError, match="worker"):
+            comms.Sent.from_dict({"session_id": "a", "target": "x", "at": 1.0,
+                                  "worker": ["peer-id"]})
